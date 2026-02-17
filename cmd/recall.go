@@ -1,0 +1,25 @@
+package cmd
+
+import "github.com/spf13/cobra"
+
+var recallCmd = &cobra.Command{
+	Use:   "recall",
+	Short: "Recall context for a query",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		query, _ := cmd.Flags().GetString("query")
+		limit, _ := cmd.Flags().GetInt("limit")
+
+		result, err := memStore.Recall(query, limit)
+		if err != nil {
+			return err
+		}
+		return outputJSON(result)
+	},
+}
+
+func init() {
+	recallCmd.Flags().String("query", "", "Recall query")
+	recallCmd.Flags().Int("limit", 5, "Maximum memories")
+	recallCmd.MarkFlagRequired("query")
+	rootCmd.AddCommand(recallCmd)
+}

@@ -1,0 +1,70 @@
+package model
+
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"time"
+)
+
+type Memory struct {
+	ID        string   `json:"id"`
+	Content   string   `json:"content"`
+	Type      string   `json:"type"`
+	Tags      []string `json:"tags"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+}
+
+type MemoryWithScore struct {
+	ID        string   `json:"id"`
+	Content   string   `json:"content"`
+	Type      string   `json:"type"`
+	Tags      []string `json:"tags"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+	Score     float32  `json:"score"`
+}
+
+type StoreResult struct {
+	ID            string  `json:"id"`
+	Status        string  `json:"status"`
+	SimilarMemory *string `json:"similar_memory,omitempty"`
+}
+
+type DeleteResult struct {
+	Deleted bool   `json:"deleted"`
+	ID      string `json:"id"`
+}
+
+type UpdateResult struct {
+	Updated bool    `json:"updated"`
+	Memory  *Memory `json:"memory,omitempty"`
+}
+
+type RecallResult struct {
+	Context  string            `json:"context"`
+	Memories []MemoryWithScore `json:"memories"`
+}
+
+// GenerateID produces a SHA256-based UUID from content, matching the Rust implementation.
+func GenerateID(content string) string {
+	h := sha256.Sum256([]byte(content))
+
+	// First 16 bytes formatted as UUID: 8-4-4-4-12 hex chars
+	p1 := binary.BigEndian.Uint32(h[0:4])
+	p2 := binary.BigEndian.Uint16(h[4:6])
+	p3 := binary.BigEndian.Uint16(h[6:8])
+	p4 := binary.BigEndian.Uint16(h[8:10])
+
+	// Last 6 bytes (h[10:16]) as a 48-bit value, matching Rust's u64 with 2 zero-padded leading bytes
+	var buf [8]byte
+	copy(buf[2:], h[10:16])
+	p5 := binary.BigEndian.Uint64(buf[:])
+
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", p1, p2, p3, p4, p5)
+}
+
+func NowRFC3339() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
