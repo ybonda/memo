@@ -4,49 +4,65 @@ A CLI memory tool with semantic search, powered by local embeddings. Store, sear
 
 Includes a native MCP server (`memo serve`) for direct integration with Claude Code and other MCP clients.
 
-## Install
+## Quick Start
 
-Requires Go 1.26+ and a C compiler (CGO is needed for sqlite-vec).
+### 1. Direct CLI usage
+
+Store memories, search them semantically, and recall context — all from the terminal.
 
 ```bash
-make install
+# Store a few memories
+memo remember --content "Go uses goroutines and channels for concurrency" --type fact --tags "go,concurrency,channels"
+memo remember --content "Always validate user input at API boundaries to prevent injection attacks" --type learning --tags "security,api"
+memo remember --content "MongoDB Atlas supports global distribution across regions" --type architecture --tags "mongodb,database"
+
+# Semantic search — finds relevant memories even with different wording
+memo search --query "parallel programming in Go"
+
+# List everything you've stored
+memo list
+
+# Get formatted context you can paste into an LLM prompt
+memo recall --query "database scaling"
+
+# Find near-duplicates before storing
+memo similar --content "Go channels enable CSP-style concurrency"
+
+# Update or remove
+memo update --id 31940748 --tags "go,concurrency,channels,goroutines"
+memo forget --id 80035334
 ```
 
-The first run downloads the embedding model (~50MB) to `~/.memo/models/`.
+In a terminal, output renders as colored cards with relative timestamps:
 
-## MCP Server
+```
+[note] this is my new mem note
+  updated: just now  ·  id: 425b2d77
 
-`memo serve` starts a long-running MCP server over stdio. This is the recommended way to use memo with Claude Code — one process stays warm with the embedding model loaded and DB connection open.
+[fact] Go uses goroutines and channels for concurrency
+  tags: go, concurrency, channels  ·  updated: 1d ago  ·  id: 31940748
 
-### Claude Code
+[learning] Always validate user input at API boundaries to prevent injection attacks
+  tags: security, api  ·  updated: 1d ago  ·  id: 428cee7e
 
-Add memo globally so it's available in every project:
+[architecture] MongoDB Atlas supports global distribution across regions
+  tags: mongodb, database  ·  updated: 1d ago  ·  id: ce7429b6
+```
+
+When piped or with `--json`, output is machine-readable JSON.
+
+### 2. Inside Claude Code / Cursor via MCP
+
+`memo serve` runs memo as a long-running MCP server over stdio. Claude Code, Cursor, and other MCP-compatible tools can call memo's tools directly — no shell forking, no model reload per call.
+
+**Setup (one command):**
 
 ```bash
+# Claude Code — add globally so memo is available in every project
 claude mcp add --scope user memo -- memo serve
+
+# Cursor — add to .cursor/mcp.json in your project
 ```
-
-Or add it to the current project only:
-
-```bash
-claude mcp add memo -- memo serve
-```
-
-Claude Code will automatically discover and use these tools:
-
-| Tool | Description |
-|------|-------------|
-| `memo_remember` | Store a memory with semantic dedup detection |
-| `memo_search` | Semantic search over memories |
-| `memo_recall` | Formatted context retrieval for LLM prompts |
-| `memo_forget` | Delete a memory by ID |
-| `memo_update` | Partial update (re-embeds on content change) |
-| `memo_list` | List memories by recency |
-| `memo_similar` | Find similar content (dedup helper) |
-
-### Other MCP Clients
-
-Any MCP client that supports stdio transport can connect:
 
 ```json
 {
@@ -59,90 +75,68 @@ Any MCP client that supports stdio transport can connect:
 }
 ```
 
-### Why MCP over CLI?
+**What it looks like in practice:**
 
-Each CLI invocation (`memo search ...`) forks a process, loads the embedding model (~1s), opens SQLite, runs one operation, and exits. The MCP server keeps everything warm — tool calls complete in milliseconds instead of seconds.
+Once configured, your AI assistant can store and retrieve memories automatically. For example, in Claude Code:
 
-## CLI Usage
+```
+You:  "Remember that our API rate limit is 100 req/s per tenant"
+       → Claude calls memo_remember with type=fact, tags=api,rate-limit
 
-Output adapts to context: human-readable colored cards in a terminal, JSON when piped or with `--json`.
+You:  "What do we know about rate limiting?"
+       → Claude calls memo_search with query="rate limiting"
+       → Gets back relevant memories with similarity scores
+
+You:  "Summarize what we've learned about our Go services"
+       → Claude calls memo_recall with query="Go services"
+       → Gets pre-formatted context injected into its prompt
+```
+
+All seven tools are available to the assistant:
+
+| Tool | What it does |
+|------|-------------|
+| `memo_remember` | Store a memory (auto-detects duplicates) |
+| `memo_search` | Semantic search across all memories |
+| `memo_recall` | Get formatted context for LLM prompts |
+| `memo_list` | List memories by recency |
+| `memo_similar` | Find near-duplicates |
+| `memo_update` | Update content, type, or tags |
+| `memo_forget` | Delete a memory by ID |
+
+> **Why MCP over CLI?** Each CLI invocation forks a process, loads the embedding model (~1s), opens SQLite, runs one operation, and exits. The MCP server keeps everything warm — tool calls complete in milliseconds instead of seconds.
+
+---
+
+## Install
+
+Requires Go 1.26+ and a C compiler (CGO is needed for sqlite-vec).
+
+```bash
+make install
+```
+
+The first run downloads the embedding model (~50MB) to `~/.memo/models/`.
+
+## CLI Reference
+
+Output adapts automatically: colored cards in a terminal, JSON when piped or with `--json`. Errors are always JSON.
 
 ```bash
 memo --json search --query "kubernetes"   # Force JSON output
 memo search --query "kubernetes"          # Cards in terminal, JSON when piped
 ```
 
-Errors are always JSON: `{"error": "message"}`.
-
-### remember — Store a memory
-
-```bash
-memo remember --content "K8s pods restart when OOMKilled" --type incident --tags "k8s,oom"
-```
-
-```json
-{"id":"a1b2c3d4-...","status":"created"}
-```
-
-Duplicate detection is automatic:
-- **Exact duplicate** (same content hash): returns `"status": "exists"`
-- **Semantic duplicate** (cosine similarity >= 0.90): returns `"status": "similar_exists"`
-
-### search — Semantic search
-
-```bash
-memo search --query "kubernetes memory issues" --limit 3
-memo search --query "deployment patterns" --type architecture
-```
-
-Returns results ranked by cosine similarity (0.0–1.0).
-
-### list — List memories
-
-```bash
-memo list
-memo list --type fact --limit 10
-```
-
-Ordered by most recently updated.
-
-### update — Modify a memory
-
-```bash
-memo update --id "a1b2c3d4-..." --tags "k8s,oom,resolved"
-memo update --id "a1b2c3d4-..." --content "New content" --type learning
-```
-
-All fields are optional — only provided fields are updated. Embedding is regenerated on content change.
-
-### recall — Get context for prompts
-
-```bash
-memo recall --query "Go concurrency patterns" --limit 3
-```
-
-```json
-{
-  "context": "1. [fact] Go uses goroutines...\n   Tags: go, concurrency\n   Score: 0.93",
-  "memories": [...]
-}
-```
-
-Returns a pre-formatted `context` string suitable for injecting into LLM prompts, plus the raw memory data.
-
-### forget — Delete a memory
-
-```bash
-memo forget --id "a1b2c3d4-..."
-```
-
-### similar — Find duplicates
-
-```bash
-memo similar --content "goroutines vs threads"
-```
-
-Returns the 5 most similar existing memories with scores.
+| Command | Flags | Notes |
+|---------|-------|-------|
+| `memo remember` | `--content` (required), `--type`, `--tags` | Auto-dedup: returns `"exists"` (exact hash) or `"similar_exists"` (cosine >= 0.90) |
+| `memo search` | `--query` (required), `--type`, `--limit` | Ranked by cosine similarity (0.0–1.0) |
+| `memo list` | `--type`, `--limit` | Ordered by most recently updated |
+| `memo recall` | `--query` (required), `--limit` | Returns pre-formatted `context` string + raw memory data |
+| `memo similar` | `--content` (required) | Returns 5 most similar memories with scores |
+| `memo update` | `--id` (required), `--content`, `--type`, `--tags` | Only provided fields change; re-embeds on content change |
+| `memo forget` | `--id` (required) | Permanent delete |
+| `memo serve` | | Starts MCP server over stdio (see Quick Start) |
 
 ## Memory Types
 
