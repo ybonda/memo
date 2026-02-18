@@ -20,11 +20,19 @@ The first run downloads the embedding model (~50MB) to `~/.memo/models/`.
 
 ### Claude Code
 
+Add memo globally so it's available in every project:
+
+```bash
+claude mcp add --scope user memo -- memo serve
+```
+
+Or add it to the current project only:
+
 ```bash
 claude mcp add memo -- memo serve
 ```
 
-This registers memo as an MCP server. Claude Code will automatically discover and use these tools:
+Claude Code will automatically discover and use these tools:
 
 | Tool | Description |
 |------|-------------|

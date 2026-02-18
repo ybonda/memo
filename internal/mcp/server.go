@@ -119,7 +119,7 @@ func (h *Handler) search(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultJSON(results)
+	return mcp.NewToolResultJSON(map[string]any{"memories": results})
 }
 
 func (h *Handler) recall(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -197,7 +197,7 @@ func (h *Handler) list(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultJSON(results)
+	return mcp.NewToolResultJSON(map[string]any{"memories": results})
 }
 
 func (h *Handler) similar(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -207,5 +207,5 @@ func (h *Handler) similar(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultJSON(results)
+	return mcp.NewToolResultJSON(map[string]any{"memories": results})
 }
