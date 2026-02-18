@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 
+	"github.com/yuri-bondarenko/memo/internal/format"
 	"github.com/yuri-bondarenko/memo/internal/model"
 )
 
@@ -26,7 +29,11 @@ var searchCmd = &cobra.Command{
 		if results == nil {
 			results = []model.MemoryWithScore{}
 		}
-		return outputJSON(results)
+		if useJSON() {
+			return outputJSON(results)
+		}
+		format.PrintMemoriesWithScore(os.Stdout, results)
+		return nil
 	},
 }
 
