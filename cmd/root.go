@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/yuri-bondarenko/memo/internal/config"
@@ -14,6 +15,7 @@ import (
 var (
 	memStore *store.MemoryStore
 	cfg      *config.Config
+	jsonFlag bool
 )
 
 var rootCmd = &cobra.Command{
@@ -40,12 +42,21 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+func init() {
+	rootCmd.PersistentFlags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
+}
+
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		out, _ := json.Marshal(map[string]string{"error": err.Error()})
 		fmt.Fprintln(os.Stdout, string(out))
 		os.Exit(1)
 	}
+}
+
+// useJSON returns true if JSON output was requested or stdout is not a terminal.
+func useJSON() bool {
+	return jsonFlag || !isatty.IsTerminal(os.Stdout.Fd())
 }
 
 func outputJSON(v any) error {

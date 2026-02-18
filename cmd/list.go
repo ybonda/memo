@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/spf13/cobra"
 
+	"github.com/yuri-bondarenko/memo/internal/format"
 	"github.com/yuri-bondarenko/memo/internal/model"
 )
 
@@ -25,7 +28,11 @@ var listCmd = &cobra.Command{
 		if results == nil {
 			results = []model.Memory{}
 		}
-		return outputJSON(results)
+		if useJSON() {
+			return outputJSON(results)
+		}
+		format.PrintMemories(os.Stdout, results)
+		return nil
 	},
 }
 

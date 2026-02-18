@@ -1,6 +1,12 @@
 package cmd
 
-import "github.com/spf13/cobra"
+import (
+	"os"
+
+	"github.com/spf13/cobra"
+
+	"github.com/yuri-bondarenko/memo/internal/format"
+)
 
 var recallCmd = &cobra.Command{
 	Use:   "recall",
@@ -13,7 +19,11 @@ var recallCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return outputJSON(result)
+		if useJSON() {
+			return outputJSON(result)
+		}
+		format.PrintRecallResult(os.Stdout, *result)
+		return nil
 	},
 }
 
