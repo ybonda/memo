@@ -1,4 +1,4 @@
-module github.com/yuri-bondarenko/memo
+module github.com/ybonda/memo
 
 go 1.26.0
 

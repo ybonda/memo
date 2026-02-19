@@ -2,24 +2,39 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/yuri-bondarenko/memo/internal/config"
-	"github.com/yuri-bondarenko/memo/internal/store"
+	"github.com/ybonda/memo/internal/config"
+	"github.com/ybonda/memo/internal/store"
 )
+
+func logErr(tool string, err error) {
+	fmt.Fprintf(os.Stderr, "[memo-serve] tool %s error: %v\n", tool, err)
+}
 
 type Handler struct {
 	store  *store.MemoryStore
 	config *config.Config
 }
 
-func Serve(s *store.MemoryStore, cfg *config.Config) error {
+// Serve starts the MCP server. The stdout parameter is the clean writer
+// for JSON-RPC messages — os.Stdout must be redirected to stderr before
+// calling this so that library noise (hugot/GoMLX) cannot corrupt the
+// JSON-RPC stream.
+func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 	h := &Handler{store: s, config: cfg}
 
 	srv := server.NewMCPServer("memo", "0.1.0",
 		server.WithToolCapabilities(false),
+		server.WithRecovery(),
+		server.WithInstructions("IMPORTANT: When calling memo tools via mcp-cli, you MUST use the --json flag or output will be invisible. Example: mcp-cli call --json memo/memo_search '{\"query\": \"...\", \"limit\": 5}'"),
 	)
 
 	typeNames := typeEnum(cfg)
@@ -78,7 +93,19 @@ func Serve(s *store.MemoryStore, cfg *config.Config) error {
 		mcp.WithString("content", mcp.Required(), mcp.Description("Content to compare")),
 	), h.similar)
 
-	return server.ServeStdio(srv)
+	stdioSrv := server.NewStdioServer(srv)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigChan
+		cancel()
+	}()
+
+	return stdioSrv.Listen(ctx, os.Stdin, stdout)
 }
 
 func typeEnum(cfg *config.Config) []string {
@@ -98,6 +125,7 @@ func (h *Handler) remember(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 
 	result, err := h.store.Store(content, tags, memType)
 	if err != nil {
+		logErr("memo_remember", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(result)
@@ -117,6 +145,7 @@ func (h *Handler) search(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 
 	results, err := h.store.Search(query, limit, typeFilter)
 	if err != nil {
+		logErr("memo_search", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(map[string]any{"memories": results})
@@ -128,6 +157,7 @@ func (h *Handler) recall(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 
 	result, err := h.store.Recall(query, limit)
 	if err != nil {
+		logErr("memo_recall", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(result)
@@ -205,6 +235,7 @@ func (h *Handler) similar(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 
 	results, err := h.store.FindSimilar(content)
 	if err != nil {
+		logErr("memo_similar", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(map[string]any{"memories": results})

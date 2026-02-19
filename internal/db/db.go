@@ -10,7 +10,7 @@ import (
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/yuri-bondarenko/memo/internal/model"
+	"github.com/ybonda/memo/internal/model"
 )
 
 func init() {
@@ -29,7 +29,7 @@ func Open(path string, dimensions int) (*DB, error) {
 		}
 	}
 
-	conn, err := sql.Open("sqlite3", path+"?_foreign_keys=on")
+	conn, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_journal_mode=wal&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("cannot open database: %w", err)
 	}

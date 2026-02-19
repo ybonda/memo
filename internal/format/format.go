@@ -9,7 +9,7 @@ import (
 
 	"github.com/fatih/color"
 
-	"github.com/yuri-bondarenko/memo/internal/model"
+	"github.com/ybonda/memo/internal/model"
 )
 
 var typeColors = map[string]*color.Color{

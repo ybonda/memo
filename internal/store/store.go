@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yuri-bondarenko/memo/internal/config"
-	"github.com/yuri-bondarenko/memo/internal/db"
-	"github.com/yuri-bondarenko/memo/internal/embedding"
-	"github.com/yuri-bondarenko/memo/internal/model"
+	"github.com/ybonda/memo/internal/config"
+	"github.com/ybonda/memo/internal/db"
+	"github.com/ybonda/memo/internal/embedding"
+	"github.com/ybonda/memo/internal/model"
 )
 
 type MemoryStore struct {
@@ -26,6 +26,13 @@ func New(cfg *config.Config) (*MemoryStore, error) {
 	if err != nil {
 		database.Close()
 		return nil, fmt.Errorf("cannot init embedder: %w", err)
+	}
+
+	// Warmup: force model weights into memory and verify inference works.
+	if _, err := embedder.Embed("warmup"); err != nil {
+		embedder.Destroy()
+		database.Close()
+		return nil, fmt.Errorf("embedder warmup failed: %w", err)
 	}
 
 	return &MemoryStore{db: database, embedder: embedder, config: cfg}, nil
