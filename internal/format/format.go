@@ -13,8 +13,8 @@ import (
 )
 
 var typeColors = map[string]*color.Color{
-	"fact":         color.New(color.FgCyan),
-	"learning":     color.New(color.FgGreen),
+	"ticket":     color.New(color.FgGreen),
+	"postmortem": color.New(color.FgCyan),
 	"architecture": color.New(color.FgMagenta),
 	"bug":          color.New(color.FgRed),
 	"incident":     color.New(color.FgYellow),

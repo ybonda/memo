@@ -1,108 +1,84 @@
 # memo
 
-A CLI memory tool with semantic search, powered by local embeddings. Store, search, and recall memories using natural language — all data stays on your machine.
+Persistent memory for AI coding agents. Give Claude Code, Cursor, Windsurf, and other MCP-compatible tools a semantic memory that survives between sessions — all data stays on your machine.
 
-Built as a Go port of memento (Rust MCP server), designed for direct CLI invocation from tools like Claude Code.
+memo runs as a local MCP server, embedding and storing memories in SQLite with vector search. Your AI agent remembers architecture decisions, bug patterns, project context, and anything else you tell it to — across every conversation.
 
-## Install
+## Quick Start
 
-Requires Go 1.24+ and a C compiler (CGO is needed for sqlite-vec).
+### 1. Install
+
+Requires Go 1.26+ and a C compiler (CGO is needed for sqlite-vec).
 
 ```bash
 make install
 ```
 
-Or install from source:
-
-```bash
-CGO_ENABLED=1 go install github.com/ybonda/memo@latest
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/ybonda/memo.git && cd memo && make build  # binary at bin/memo
-```
-
 The first run downloads the embedding model (~50MB) to `~/.memo/models/`.
 
-## Usage
+### 2. Connect to your AI agent
 
-All output is JSON to stdout. Errors are also JSON: `{"error": "message"}`.
-
-### remember — Store a memory
+**Claude Code** (one command, available in every project):
 
 ```bash
-memo remember --content "K8s pods restart when OOMKilled" --type incident --tags "k8s,oom"
+claude mcp add --scope user memo -- memo serve
 ```
 
-```json
-{"id":"a1b2c3d4-...","status":"created"}
-```
-
-Duplicate detection is automatic:
-- **Exact duplicate** (same content hash): returns `"status": "exists"`
-- **Semantic duplicate** (cosine similarity >= 0.90): returns `"status": "similar_exists"`
-
-### search — Semantic search
-
-```bash
-memo search --query "kubernetes memory issues" --limit 3
-memo search --query "deployment patterns" --type architecture
-```
-
-Returns results ranked by cosine similarity (0.0–1.0).
-
-### list — List memories
-
-```bash
-memo list
-memo list --type fact --limit 10
-```
-
-Ordered by most recently updated.
-
-### update — Modify a memory
-
-```bash
-memo update --id "a1b2c3d4-..." --tags "k8s,oom,resolved"
-memo update --id "a1b2c3d4-..." --content "New content" --type learning
-```
-
-All fields are optional — only provided fields are updated. Embedding is regenerated on content change.
-
-### recall — Get context for prompts
-
-```bash
-memo recall --query "Go concurrency patterns" --limit 3
-```
+**Cursor / Windsurf** (add to `.cursor/mcp.json` or equivalent):
 
 ```json
 {
-  "context": "1. [fact] Go uses goroutines...\n   Tags: go, concurrency\n   Score: 0.93",
-  "memories": [...]
+  "mcpServers": {
+    "memo": {
+      "command": "memo",
+      "args": ["serve"]
+    }
+  }
 }
 ```
 
-Returns a pre-formatted `context` string suitable for injecting into LLM prompts, plus the raw memory data.
+That's it. Your agent now has persistent memory.
 
-### forget — Delete a memory
+### 3. Use it
 
-```bash
-memo forget --id "a1b2c3d4-..."
+Once connected, your AI agent can store and retrieve memories automatically:
+
+```
+You:  "Remember that our API rate limit is 100 req/s per tenant"
+       → agent calls memo_remember with type=note, tags=api,rate-limit
+
+You:  "What do we know about rate limiting?"
+       → agent calls memo_search with query="rate limiting"
+       → Gets back relevant memories with similarity scores
+
+You:  "Summarize what we've learned about our Go services"
+       → agent calls memo_recall with query="Go services"
+       → Gets pre-formatted context injected into its prompt
 ```
 
-### similar — Find duplicates
+Memories persist across sessions. Next week, in a different project, the agent can still recall what you stored today.
 
-```bash
-memo similar --content "goroutines vs threads"
-```
+## MCP Tools
 
-Returns the 5 most similar existing memories with scores.
+The MCP server exposes seven tools to the agent:
 
-## Memory Types
+| Tool | What it does |
+|------|-------------|
+| `memo_remember` | Store a memory (auto-detects duplicates) |
+| `memo_search` | Semantic search across all memories |
+| `memo_recall` | Get formatted context for LLM prompts |
+| `memo_list` | List memories by recency |
+| `memo_similar` | Find near-duplicates |
+| `memo_update` | Update content, type, or tags |
+| `memo_forget` | Delete a memory by ID |
 
-Types are defined in config and validated at runtime. Unknown types are rejected with an error listing valid options.
+The server keeps the embedding model and database connection warm for the entire session — tool calls complete in milliseconds.
+
+## Custom Memory Types
+
+Memory types are fully configurable — define whatever categories make sense for your workflow. Types are validated at runtime; unknown types are rejected with an error listing valid options.
+
+**Default types:**
 
 | Type | Description |
 |---|---|
@@ -110,10 +86,27 @@ Types are defined in config and validated at runtime. Unknown types are rejected
 | `bug` | Bug reports, error patterns, known issues |
 | `incident` | Production incidents, outages, escalations |
 | `architecture` | Architecture decisions, system design patterns |
-| `learning` | Lessons learned, insights, patterns |
-| `fact` | Verified information, solutions, configs |
+| `ticket` | Tickets, tasks, action items, follow-ups |
+| `postmortem` | Post-incident analysis, root causes, remediation steps |
 
-Add custom types by editing `~/.memo/config.yaml`.
+**Adding or renaming types:**
+
+Edit the `types` section in `~/.memo/config.yaml`:
+
+```yaml
+types:
+  - name: note
+    description: "General observations, ideas, WIP thoughts"
+    default: true
+  - name: bug
+    description: "Bug reports, error patterns, known issues"
+  - name: my-custom-type
+    description: "Whatever fits your workflow"
+```
+
+The first type with `default: true` is used when no type is specified. If no type has `default: true`, the first type in the list becomes the default.
+
+> **Note:** The MCP server reads the config once at startup and registers types as a fixed enum in tool schemas. After editing `config.yaml`, restart the MCP server for changes to take effect. CLI commands pick up config changes immediately.
 
 ## Configuration
 
@@ -137,71 +130,68 @@ types:
     description: "Production incidents, outages, escalations"
   - name: architecture
     description: "Architecture decisions, system design patterns"
-  - name: learning
-    description: "Lessons learned, insights, patterns"
-  - name: fact
-    description: "Verified information, solutions, configs"
+  - name: ticket
+    description: "Tickets, tasks, action items, follow-ups"
+  - name: postmortem
+    description: "Post-incident analysis, root causes, remediation steps"
 ```
 
-## Architecture
+## CLI
 
-```
-memo
-├── main.go                          # Entry point → cmd.Execute()
-├── cmd/
-│   ├── root.go                      # Cobra root, config loading, store init
-│   ├── remember.go                  # Store with duplicate detection
-│   ├── search.go                    # KNN semantic search
-│   ├── list.go                      # List by recency, optional type filter
-│   ├── forget.go                    # Delete by ID
-│   ├── update.go                    # Partial update + re-embed
-│   ├── recall.go                    # Formatted context for LLM prompts
-│   └── similar.go                   # Deduplication search
-├── internal/
-│   ├── config/config.go             # YAML config + type registry
-│   ├── model/model.go               # Memory structs, SHA256 ID generation
-│   ├── db/db.go                     # SQLite + sqlite-vec (cosine KNN)
-│   ├── embedding/embedding.go       # hugot GoMLX embedding pipeline
-│   └── store/store.go               # MemoryStore business logic
-└── Makefile
-```
+memo also works as a standalone CLI tool. Output adapts automatically: colored cards in a terminal, JSON when piped or with `--json`.
 
-### Data flow
+```bash
+# Store a few memories
+memo remember --content "Go uses goroutines and channels for concurrency" --type note --tags "go,concurrency,channels"
+memo remember --content "Always validate user input at API boundaries" --type ticket --tags "security,api"
 
-```
-CLI flags → Cobra command → MemoryStore → DB + Embedder → JSON stdout
+# Semantic search — finds relevant memories even with different wording
+memo search --query "parallel programming in Go"
+
+# List everything
+memo list
+
+# Get formatted context you can paste into an LLM prompt
+memo recall --query "database scaling"
+
+# Find near-duplicates before storing
+memo similar --content "Go channels enable CSP-style concurrency"
+
+# Update or remove
+memo update --id 31940748 --tags "go,concurrency,channels,goroutines"
+memo forget --id 80035334
 ```
 
-1. **Cobra** parses flags, validates required params
-2. **MemoryStore** orchestrates business logic (dedup check, embedding, CRUD)
-3. **Embedder** (hugot/GoMLX) converts text → 384-dim float32 vector, pure Go inference
-4. **DB** (SQLite + sqlite-vec) stores memories and runs cosine KNN search
-5. **JSON** result written to stdout
+Terminal output renders as colored cards with relative timestamps:
 
-### Database schema
+```
+[note] Go uses goroutines and channels for concurrency
+  tags: go, concurrency, channels  ·  updated: 1d ago  ·  id: 31940748
 
-Three tables in `~/.memo/memories.db`:
+[ticket] Always validate user input at API boundaries
+  tags: security, api  ·  updated: 1d ago  ·  id: 428cee7e
+```
 
-- **`memories`** — content, type, tags, timestamps
-- **`memories_vec`** — sqlite-vec virtual table with cosine distance, stores float[384] embeddings
-- **`memory_vectors`** — bridges memory IDs to vector rowids
+### CLI Reference
 
-### Key design decisions
+| Command | Flags | Notes |
+|---------|-------|-------|
+| `memo remember` | `--content` (required), `--type`, `--tags` | Auto-dedup: returns `"exists"` (exact hash) or `"similar_exists"` (cosine >= 0.90) |
+| `memo search` | `--query` (required), `--type`, `--limit` | Ranked by cosine similarity (0.0-1.0) |
+| `memo list` | `--type`, `--limit` | Ordered by most recently updated |
+| `memo recall` | `--query` (required), `--limit` | Returns pre-formatted `context` string + raw memory data |
+| `memo similar` | `--content` (required) | Returns 5 most similar memories with scores |
+| `memo update` | `--id` (required), `--content`, `--type`, `--tags` | Only provided fields change; re-embeds on content change |
+| `memo forget` | `--id` (required) | Permanent delete |
+| `memo serve` | | Starts MCP server over stdio |
+
+## Design
 
 | Decision | Rationale |
 |---|---|
-| Pure Go embeddings (GoMLX) | No ONNX Runtime install required |
-| sqlite-vec cosine distance | Proper 0–1 similarity scores for semantic search |
+| Local MCP server over stdio | Single warm process — no per-call model load or DB open overhead |
+| Pure Go embeddings (GoMLX) | No ONNX Runtime install required, zero external dependencies |
+| sqlite-vec cosine distance | Proper 0-1 similarity scores for semantic search |
 | SHA256 content-hashed IDs | Deterministic — same content always gets same ID, enabling dedup |
 | Config-driven types | Extensible without recompilation, strict validation |
-| JSON-only output | Machine-parseable for tool integration |
-
-### Dependencies
-
-| Package | Purpose |
-|---|---|
-| `github.com/spf13/cobra` | CLI framework |
-| `github.com/mattn/go-sqlite3` | SQLite driver (CGO) |
-| `github.com/asg017/sqlite-vec-go-bindings/cgo` | Vector search extension |
-| `github.com/knights-analytics/hugot` | Embedding pipeline (GoMLX backend) |
-| `gopkg.in/yaml.v3` | Config parsing |
+| Dual output (TTY cards / JSON) | Human-friendly in terminal, machine-parseable when piped |
