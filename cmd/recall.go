@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yuri-bondarenko/memo/internal/format"
+	"github.com/ybonda/memo/internal/format"
 )
 
 var recallCmd = &cobra.Command{

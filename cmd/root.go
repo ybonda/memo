@@ -8,8 +8,8 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
-	"github.com/yuri-bondarenko/memo/internal/config"
-	"github.com/yuri-bondarenko/memo/internal/store"
+	"github.com/ybonda/memo/internal/config"
+	"github.com/ybonda/memo/internal/store"
 )
 
 var (

@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yuri-bondarenko/memo/internal/format"
-	"github.com/yuri-bondarenko/memo/internal/model"
+	"github.com/ybonda/memo/internal/format"
+	"github.com/ybonda/memo/internal/model"
 )
 
 var similarCmd = &cobra.Command{
