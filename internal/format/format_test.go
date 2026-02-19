@@ -83,14 +83,14 @@ func TestPrintMemories(t *testing.T) {
 		{
 			ID:        "31940748-abcd-1234-5678-9abcdef01234",
 			Content:   "Go uses goroutines",
-			Type:      "fact",
+			Type:      "postmortem",
 			Tags:      []string{"go", "concurrency"},
 			UpdatedAt: now,
 		},
 		{
 			ID:        "428cee7e-1111-2222-3333-444455556666",
 			Content:   "Validate input",
-			Type:      "learning",
+			Type:      "ticket",
 			Tags:      []string{"security"},
 			UpdatedAt: now,
 		},
@@ -100,11 +100,11 @@ func TestPrintMemories(t *testing.T) {
 	PrintMemories(&buf, memories)
 	out := buf.String()
 
-	if !strings.Contains(out, "[fact]") {
-		t.Error("expected [fact] type label")
+	if !strings.Contains(out, "[postmortem]") {
+		t.Error("expected [postmortem] type label")
 	}
-	if !strings.Contains(out, "[learning]") {
-		t.Error("expected [learning] type label")
+	if !strings.Contains(out, "[ticket]") {
+		t.Error("expected [ticket] type label")
 	}
 	if !strings.Contains(out, "Go uses goroutines") {
 		t.Error("expected memory content")
@@ -127,7 +127,7 @@ func TestPrintMemoriesWithScore(t *testing.T) {
 		{
 			ID:        "31940748-abcd-1234-5678-9abcdef01234",
 			Content:   "Go uses goroutines",
-			Type:      "fact",
+			Type:      "postmortem",
 			Tags:      []string{"go"},
 			Score:     0.95,
 			UpdatedAt: now,
@@ -141,7 +141,7 @@ func TestPrintMemoriesWithScore(t *testing.T) {
 	if !strings.Contains(out, "(95%)") {
 		t.Errorf("expected score percentage, got:\n%s", out)
 	}
-	if !strings.Contains(out, "[fact]") {
+	if !strings.Contains(out, "[postmortem]") {
 		t.Error("expected type label")
 	}
 }
@@ -162,7 +162,7 @@ func TestPrintRecallResult(t *testing.T) {
 			{
 				ID:        "31940748-abcd-1234-5678-9abcdef01234",
 				Content:   "Go uses goroutines",
-				Type:      "fact",
+				Type:      "postmortem",
 				Tags:      []string{"go"},
 				Score:     0.95,
 				UpdatedAt: now,
@@ -202,7 +202,7 @@ func TestScoreRounding(t *testing.T) {
 		{
 			ID:        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 			Content:   "test",
-			Type:      "fact",
+			Type:      "postmortem",
 			Score:     0.8249,
 			UpdatedAt: now,
 		},

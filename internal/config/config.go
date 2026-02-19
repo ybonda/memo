@@ -47,8 +47,8 @@ func DefaultConfig() *Config {
 			{Name: "bug", Description: "Bug reports, error patterns, known issues"},
 			{Name: "incident", Description: "Production incidents, outages, escalations"},
 			{Name: "architecture", Description: "Architecture decisions, system design patterns"},
-			{Name: "learning", Description: "Lessons learned, insights, patterns"},
-			{Name: "fact", Description: "Verified information, solutions, configs"},
+			{Name: "ticket", Description: "Tickets, tasks, action items, follow-ups"},
+			{Name: "postmortem", Description: "Post-incident analysis, root causes, remediation steps"},
 		},
 	}
 }
