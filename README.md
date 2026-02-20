@@ -4,6 +4,64 @@ Persistent memory for AI coding agents. Give Claude Code, Cursor, Windsurf, and 
 
 memo runs as a local MCP server, embedding and storing memories in SQLite with vector search. Your AI agent remembers architecture decisions, bug patterns, project context, and anything else you tell it to — across every conversation.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Clients
+        AGENT(["AI Agent<br/>Claude Code / Cursor / Windsurf"])
+        TERM(["Terminal"])
+    end
+
+    subgraph Entry["Entry Layer"]
+        MCP["MCP Server<br/><i>mcp-go, stdio JSON-RPC</i>"]
+        CLI["CLI<br/><i>Cobra, 7 commands</i>"]
+    end
+
+    STORE(["MemoryStore<br/>Orchestration, Two-tier dedup"])
+
+    subgraph Infra["Infrastructure"]
+        EMB["Embedder<br/><i>hugot / GoMLX</i><br/>BAAI/bge-small-en-v1.5<br/><i>text to float32 x384</i>"]
+        DB["Database<br/><i>SQLite + sqlite-vec</i><br/>Cosine KNN search"]
+        FMT["Formatter<br/><i>fatih/color, go-isatty</i><br/>TTY cards | JSON"]
+    end
+
+    subgraph Storage["On disk: ~/.memo/"]
+        direction LR
+        DBFILE[("memories.db")]
+        MODELS[("models/<br/>bge-small-en-v1.5")]
+        CONF[("config.yaml")]
+    end
+
+    AGENT -- "JSON-RPC over stdio" --> MCP
+    TERM -- "flags and args" --> CLI
+    MCP --> STORE
+    CLI --> STORE
+    CLI --> FMT
+    STORE --> EMB
+    STORE --> DB
+    DB -.-> DBFILE
+    EMB -.-> MODELS
+```
+
+**Data flow for `remember` (the most complex operation):**
+
+```
+Content in → SHA256 hash → ID (exact dedup) → Embed text → KNN search (semantic dedup) → Insert memory + vector
+                ↓ match                           ↓ cosine ≥ 0.90
+            return "exists"                   return "similar_exists"
+```
+
+**Key tech choices:**
+
+| Layer | Technology | Why |
+|-------|-----------|-----|
+| Embedding | [hugot](https://github.com/knights-analytics/hugot) + GoMLX | Pure Go inference — no Python, no ONNX Runtime, zero external dependencies |
+| Vector search | [sqlite-vec](https://github.com/asg017/sqlite-vec) | Cosine KNN as a SQLite extension — single file, no separate vector DB |
+| MCP transport | [mcp-go](https://github.com/mark3labs/mcp-go) | Stdio JSON-RPC — agent spawns memo as a child process, keeps it warm |
+| CLI framework | [Cobra](https://github.com/spf13/cobra) | Standard Go CLI toolkit with subcommands and flag parsing |
+| Output | [fatih/color](https://github.com/fatih/color) + [go-isatty](https://github.com/mattn/go-isatty) | Auto-detects terminal vs pipe — colored cards for humans, JSON for machines |
+
 ## Quick Start
 
 ### 1. Install
