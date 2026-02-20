@@ -98,7 +98,7 @@ func printCard(w io.Writer, typeName, content string, tags []string, updatedAt s
 		parts = append(parts, "tags: "+strings.Join(tags, ", "))
 	}
 	parts = append(parts, "updated: "+relativeTime(updatedAt))
-	parts = append(parts, "id: "+shortID(id))
+	parts = append(parts, "id: "+id)
 
 	sep := dimColor.Sprint("  ·  ")
 	dimColor.Fprintf(w, "  %s\n", strings.Join(parts, sep))
@@ -143,13 +143,4 @@ func relativeTime(rfc3339 string) string {
 		}
 		return fmt.Sprintf("%dmo ago", months)
 	}
-}
-
-// shortID returns the first 8 characters of a UUID.
-func shortID(id string) string {
-	clean := strings.ReplaceAll(id, "-", "")
-	if len(clean) > 8 {
-		return clean[:8]
-	}
-	return clean
 }

@@ -51,24 +51,6 @@ func TestRelativeTimeInvalid(t *testing.T) {
 	}
 }
 
-func TestShortID(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"31940748-abcd-1234-5678-9abcdef01234", "31940748"},
-		{"abcdef01", "abcdef01"},
-		{"ab", "ab"},
-	}
-
-	for _, tt := range tests {
-		got := shortID(tt.input)
-		if got != tt.expected {
-			t.Errorf("shortID(%q) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
 func TestPrintMemoriesEmpty(t *testing.T) {
 	var buf bytes.Buffer
 	PrintMemories(&buf, []model.Memory{})
@@ -112,8 +94,8 @@ func TestPrintMemories(t *testing.T) {
 	if !strings.Contains(out, "go, concurrency") {
 		t.Error("expected tags")
 	}
-	if !strings.Contains(out, "id: 31940748") {
-		t.Error("expected short ID")
+	if !strings.Contains(out, "id: 31940748-abcd-1234-5678-9abcdef01234") {
+		t.Error("expected full ID")
 	}
 	// Should have blank line between cards
 	if !strings.Contains(out, "\n\n") {
