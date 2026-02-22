@@ -33,6 +33,11 @@ case "$RAW_ARCH" in
     *)               error "Error: unsupported architecture: $RAW_ARCH" ;;
 esac
 
+# No pre-built binary for darwin/amd64 (Intel Mac) — build from source instead
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "amd64" ]; then
+    error "Error: no pre-built binary for macOS Intel (x86_64). Install from source: git clone https://github.com/${GITHUB_REPO}.git && cd memo && make install"
+fi
+
 info "Detected platform: ${OS}/${ARCH}"
 
 # --- Version resolution ---

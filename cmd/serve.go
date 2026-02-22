@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/ybonda/memo/internal/config"
 	mcpserver "github.com/ybonda/memo/internal/mcp"
@@ -28,7 +29,7 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("dup stdout: %w", err)
 		}
-		if err := syscall.Dup2(2, 1); err != nil { // fd 1 → stderr
+		if err := unix.Dup2(2, 1); err != nil { // fd 1 → stderr
 			return fmt.Errorf("dup2 stderr→stdout: %w", err)
 		}
 		mcpOut := os.NewFile(uintptr(mcpFd), "mcp-stdout")

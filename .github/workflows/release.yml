@@ -13,9 +13,6 @@ jobs:
           - runner: macos-14
             goos: darwin
             goarch: arm64
-          - runner: macos-13
-            goos: darwin
-            goarch: amd64
           - runner: ubuntu-latest
             goos: linux
             goarch: amd64
@@ -105,7 +102,6 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
 
           SHA_DARWIN_ARM64=$(sha256sum dist/memo_${VERSION}_darwin_arm64.tar.gz | awk '{print $1}')
-          SHA_DARWIN_AMD64=$(sha256sum dist/memo_${VERSION}_darwin_amd64.tar.gz | awk '{print $1}')
           SHA_LINUX_AMD64=$(sha256sum dist/memo_${VERSION}_linux_amd64.tar.gz | awk '{print $1}')
           SHA_LINUX_ARM64=$(sha256sum dist/memo_${VERSION}_linux_arm64.tar.gz | awk '{print $1}')
 
@@ -120,10 +116,6 @@ jobs:
               on_arm do
                 url "https://github.com/ybonda/memo/releases/download/v${VERSION}/memo_${VERSION}_darwin_arm64.tar.gz"
                 sha256 "${SHA_DARWIN_ARM64}"
-              end
-              on_intel do
-                url "https://github.com/ybonda/memo/releases/download/v${VERSION}/memo_${VERSION}_darwin_amd64.tar.gz"
-                sha256 "${SHA_DARWIN_AMD64}"
               end
             end
 
