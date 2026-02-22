@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+          - runner: macos-13
+            goos: darwin
+            goarch: amd64
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set VERSION
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+        shell: bash
+
+      - name: Build
+        shell: bash
+        run: |
+          CGO_ENABLED=1 go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/ybonda/memo/internal/version.Version=$VERSION \
+              -X github.com/ybonda/memo/internal/version.Commit=$GITHUB_SHA \
+              -X github.com/ybonda/memo/internal/version.Date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o memo .
+
+      - name: Smoke test
+        run: ./memo --version
+
+      - name: Archive
+        shell: bash
+        run: tar czf memo_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz memo LICENSE README.md
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: memo_${{ env.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: memo_${{ env.VERSION }}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Generate checksums
+        shell: bash
+        run: cd dist && sha256sum *.tar.gz > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist/
+
+      - name: Generate Homebrew formula
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+
+          SHA_DARWIN_ARM64=$(sha256sum dist/memo_${VERSION}_darwin_arm64.tar.gz | awk '{print $1}')
+          SHA_DARWIN_AMD64=$(sha256sum dist/memo_${VERSION}_darwin_amd64.tar.gz | awk '{print $1}')
+          SHA_LINUX_AMD64=$(sha256sum dist/memo_${VERSION}_linux_amd64.tar.gz | awk '{print $1}')
+          SHA_LINUX_ARM64=$(sha256sum dist/memo_${VERSION}_linux_arm64.tar.gz | awk '{print $1}')
+
+          cat > memo.rb <<EOF
+          class Memo < Formula
+            desc "Persistent memory layer with semantic search for AI coding agents"
+            homepage "https://github.com/ybonda/memo"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/ybonda/memo/releases/download/v${VERSION}/memo_${VERSION}_darwin_arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/ybonda/memo/releases/download/v${VERSION}/memo_${VERSION}_darwin_amd64.tar.gz"
+                sha256 "${SHA_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/ybonda/memo/releases/download/v${VERSION}/memo_${VERSION}_linux_arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/ybonda/memo/releases/download/v${VERSION}/memo_${VERSION}_linux_amd64.tar.gz"
+                sha256 "${SHA_LINUX_AMD64}"
+              end
+            end
+
+            def install
+              bin.install "memo"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/memo --version")
+            end
+          end
+          EOF
+
+      - name: Publish to Homebrew tap
+        shell: bash
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/ybonda/homebrew-tap.git
+          mkdir -p homebrew-tap/Formula
+          cp memo.rb homebrew-tap/Formula/memo.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/memo.rb
+          git commit -m "Update memo to ${GITHUB_REF_NAME#v}"
+          git push

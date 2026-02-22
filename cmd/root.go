@@ -10,6 +10,7 @@ import (
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/store"
+	"github.com/ybonda/memo/internal/version"
 )
 
 var (
@@ -43,6 +44,7 @@ var rootCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.Version = version.Version
 	rootCmd.PersistentFlags().BoolVar(&jsonFlag, "json", false, "Output as JSON")
 }
 

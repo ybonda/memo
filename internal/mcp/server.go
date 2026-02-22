@@ -13,6 +13,7 @@ import (
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/store"
+	"github.com/ybonda/memo/internal/version"
 )
 
 func logErr(tool string, err error) {
@@ -31,7 +32,7 @@ type Handler struct {
 func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 	h := &Handler{store: s, config: cfg}
 
-	srv := server.NewMCPServer("memo", "0.1.0",
+	srv := server.NewMCPServer("memo", version.Version,
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
 		server.WithInstructions("IMPORTANT: When calling memo tools via mcp-cli, you MUST use the --json flag or output will be invisible. Example: mcp-cli call --json memo/memo_search '{\"query\": \"...\", \"limit\": 5}'"),

@@ -66,10 +66,24 @@ Content in → SHA256 hash → ID (exact dedup) → Embed text → KNN search (s
 
 ### 1. Install
 
-Requires Go 1.26+ and a C compiler (CGO is needed for sqlite-vec).
+**Homebrew** (macOS and Linux):
 
 ```bash
-make install
+brew install ybonda/tap/memo
+```
+
+**Install script** (macOS and Linux — auto-detects platform, verifies checksum):
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/ybonda/memo/main/install.sh | sh
+```
+
+**Pre-built binaries**: download from [GitHub Releases](https://github.com/ybonda/memo/releases).
+
+**Build from source** (requires Go 1.26+ and a C compiler):
+
+```bash
+git clone https://github.com/ybonda/memo.git && cd memo && make install
 ```
 
 The first run downloads the embedding model (~50MB) to `~/.memo/models/`.
