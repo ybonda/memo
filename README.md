@@ -66,17 +66,20 @@ Content in → SHA256 hash → ID (exact dedup) → Embed text → KNN search (s
 
 ### 1. Install
 
-**Homebrew** (macOS and Linux):
+**Option 1 — Homebrew** (recommended):
 
 ```bash
 brew install ybonda/tap/memo
 ```
 
-**Install script** (macOS and Linux — auto-detects platform, verifies checksum):
+**Option 2 — Install script** (if you don't use Homebrew):
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/ybonda/memo/main/install.sh | sh
 ```
+
+<details>
+<summary>Option 3 — Other methods</summary>
 
 **Pre-built binaries**: download from [GitHub Releases](https://github.com/ybonda/memo/releases).
 
@@ -85,6 +88,8 @@ curl -sSfL https://raw.githubusercontent.com/ybonda/memo/main/install.sh | sh
 ```bash
 git clone https://github.com/ybonda/memo.git && cd memo && make install
 ```
+
+</details>
 
 The first run downloads the embedding model (~50MB) to `~/.memo/models/`.
 
@@ -230,18 +235,18 @@ memo recall --query "database scaling"
 memo similar --content "Go channels enable CSP-style concurrency"
 
 # Update or remove
-memo update --id 31940748 --tags "go,concurrency,channels,goroutines"
-memo forget --id 80035334
+memo update --id 31940748-a1b2-c3d4-e5f6-119922334455 --tags "go,concurrency,channels,goroutines"
+memo forget --id 80035334-f6e5-d4c3-b2a1-554433221100
 ```
 
 Terminal output renders as colored cards with relative timestamps:
 
 ```
 [note] Go uses goroutines and channels for concurrency
-  tags: go, concurrency, channels  ·  updated: 1d ago  ·  id: 31940748
+  tags: go, concurrency, channels  ·  updated: 1d ago  ·  id: 31940748-a1b2-c3d4-e5f6-119922334455
 
 [ticket] Always validate user input at API boundaries
-  tags: security, api  ·  updated: 1d ago  ·  id: 428cee7e
+  tags: security, api  ·  updated: 1d ago  ·  id: 428cee7e-9f8a-7b6c-5d4e-aabbccddeeff
 ```
 
 ### CLI Reference
