@@ -1,6 +1,6 @@
 # memo
 
-Persistent memory for AI coding agents. Give Claude Code, Cursor, Windsurf, and other MCP-compatible tools a semantic memory that survives between sessions — all data stays on your machine.
+Persistent memory for AI coding agents. Give Claude Code, Cursor, Codex, and other MCP-compatible tools a semantic memory that survives between sessions — all data stays on your machine.
 
 memo runs as a local MCP server, embedding and storing memories in SQLite with vector search. Your AI agent remembers architecture decisions, bug patterns, project context, and anything else you tell it to — across every conversation.
 
