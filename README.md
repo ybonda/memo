@@ -217,7 +217,8 @@ types:
 
 ## CLI
 
-memo also works as a standalone CLI tool. Output adapts automatically: colored cards in a terminal, JSON when piped or with `--json`.
+memo also works as a standalone CLI tool.
+Output adapts automatically: colored cards in a terminal, JSON when piped or with `--json`.
 
 ```bash
 # Store a few memories
