@@ -6,11 +6,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/ybonda/memo/internal/capture"
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/store"
 	"github.com/ybonda/memo/internal/version"
@@ -44,8 +46,13 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 	srv.AddTool(mcp.NewTool("memo_remember",
 		mcp.WithDescription("Store a new memory with semantic dedup detection"),
 		mcp.WithString("content", mcp.Required(), mcp.Description("The content to remember")),
-		mcp.WithString("type", mcp.Description("Memory type"), mcp.Enum(typeNames...)),
+		mcp.WithString("type", mcp.Description(typeDescription(cfg, "Memory type to assign")), mcp.Enum(typeNames...)),
 		mcp.WithArray("tags", mcp.Description("Tags for the memory"), mcp.WithStringItems()),
+		mcp.WithObject("context", mcp.Description(
+			"Optional capture-context fields as a flat key/value map. "+
+				"Recognised keys include ticket, pr, project, related. "+
+				"Values override any git auto-capture on the same key.",
+		)),
 	), h.remember)
 
 	// memo_search
@@ -65,9 +72,9 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 
 	// memo_forget
 	srv.AddTool(mcp.NewTool("memo_forget",
-		mcp.WithDescription("Delete a memory by ID"),
+		mcp.WithDescription("Delete a memory by full UUID or 8-hex short-id (the prefix on Obsidian filenames)"),
 		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("id", mcp.Required(), mcp.Description("Memory ID to delete")),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Full UUID (36 chars) or 8-hex short-id prefix")),
 	), h.forget)
 
 	// memo_update
@@ -75,7 +82,7 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 		mcp.WithDescription("Partially update a memory (re-embeds on content change)"),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Memory ID to update")),
 		mcp.WithString("content", mcp.Description("New content")),
-		mcp.WithString("type", mcp.Description("New memory type"), mcp.Enum(typeNames...)),
+		mcp.WithString("type", mcp.Description(typeDescription(cfg, "New memory type")), mcp.Enum(typeNames...)),
 		mcp.WithArray("tags", mcp.Description("New tags"), mcp.WithStringItems()),
 	), h.update)
 
@@ -93,6 +100,13 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Content to compare")),
 	), h.similar)
+
+	// memo_reconcile
+	srv.AddTool(mcp.NewTool("memo_reconcile",
+		mcp.WithDescription("Reflect Obsidian deletes and type-folder moves back into the DB. Dry-run by default; set apply=true to commit."),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithBoolean("apply", mcp.Description("If true, commit the diff; otherwise preview only")),
+	), h.reconcile)
 
 	stdioSrv := server.NewStdioServer(srv)
 
@@ -117,6 +131,28 @@ func typeEnum(cfg *config.Config) []string {
 	return names
 }
 
+// typeDescription renders the configured types as a bulleted list so the LLM
+// can pick the right one when assigning a memory's type. Built from
+// cfg.Types[].Description, so editing ~/.memo/config.yaml and restarting
+// `memo serve` updates what the agent sees.
+func typeDescription(cfg *config.Config, prefix string) string {
+	if len(cfg.Types) == 0 {
+		return prefix
+	}
+	var b strings.Builder
+	b.WriteString(prefix)
+	b.WriteString(". Options:")
+	for _, t := range cfg.Types {
+		b.WriteString("\n- ")
+		b.WriteString(t.Name)
+		if t.Description != "" {
+			b.WriteString(": ")
+			b.WriteString(t.Description)
+		}
+	}
+	return b.String()
+}
+
 // --- Tool handlers ---
 
 func (h *Handler) remember(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -124,12 +160,39 @@ func (h *Handler) remember(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	memType := req.GetString("type", "")
 	tags := req.GetStringSlice("tags", nil)
 
-	result, err := h.store.Store(content, tags, memType)
+	ctx := mergeCaptureContext(h.config, req.GetArguments()["context"])
+
+	result, err := h.store.Store(content, tags, memType, ctx)
 	if err != nil {
 		logErr("memo_remember", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(result)
+}
+
+// mergeCaptureContext combines git auto-capture (from the server's cwd) with
+// caller-supplied context. MCP-supplied values win over auto-captured ones on
+// the same key. Returns nil when nothing was populated.
+func mergeCaptureContext(cfg *config.Config, raw any) map[string]string {
+	out := map[string]string{}
+	if cfg != nil && cfg.CaptureContext() {
+		if cwd, err := os.Getwd(); err == nil {
+			for k, v := range capture.Git(cwd) {
+				out[k] = v
+			}
+		}
+	}
+	if m, ok := raw.(map[string]any); ok {
+		for k, v := range m {
+			if s, ok := v.(string); ok && s != "" {
+				out[k] = s
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (h *Handler) search(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -165,10 +228,25 @@ func (h *Handler) recall(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func (h *Handler) forget(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id := req.GetString("id", "")
+	idOrShort := req.GetString("id", "")
 
+	id, err := h.store.ResolveID(idOrShort)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	result, err := h.store.Delete(id)
 	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+func (h *Handler) reconcile(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	apply := req.GetBool("apply", false)
+
+	result, err := h.store.ReconcileVault(store.ReconcileOptions{Apply: apply})
+	if err != nil {
+		logErr("memo_reconcile", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(result)

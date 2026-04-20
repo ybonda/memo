@@ -1,22 +1,69 @@
 package store
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/db"
 	"github.com/ybonda/memo/internal/embedding"
+	"github.com/ybonda/memo/internal/llm"
 	"github.com/ybonda/memo/internal/model"
+	"github.com/ybonda/memo/internal/vault"
 )
+
+// ReconcileOptions controls a vault-to-DB reconcile pass.
+type ReconcileOptions struct {
+	// Apply commits the diff. Without it, ReconcileVault is purely read-only
+	// (dry-run) and callers can preview intended changes.
+	Apply bool
+}
+
+// DeleteItem describes a memory the reconcile pass would delete.
+type DeleteItem struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// TypeChange describes a memory whose type folder has changed in the vault.
+type TypeChange struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	OldType string `json:"old_type"`
+	NewType string `json:"new_type"`
+}
+
+// ReconcileResult summarizes a reconcile pass.
+type ReconcileResult struct {
+	Applied     bool         `json:"applied"`
+	ToDelete    []DeleteItem `json:"to_delete"`
+	TypeChanges []TypeChange `json:"type_changes"`
+	Unknown     []string     `json:"unknown"`
+}
+
+// listAllCap is the effective upper bound used when the store needs to
+// iterate every memory (e.g. full vault export). SQLite's LIMIT requires a
+// concrete integer; this is large enough to cover any realistic memory
+// collection.
+const listAllCap = 1 << 30
 
 type MemoryStore struct {
 	db       *db.DB
 	embedder *embedding.Embedder
 	config   *config.Config
+	vault    *vault.Vault // optional; nil disables vault export
+	renderer llm.Renderer // optional; nil when LLMExport.Enabled is false
 }
 
-func New(cfg *config.Config) (*MemoryStore, error) {
+// New constructs a MemoryStore. The vault is optional — pass nil to disable
+// Obsidian export (useful in tests or tools that should not touch the
+// filesystem beyond the DB). The LLM renderer is configured automatically
+// from cfg.LLMExport; when disabled, the deterministic vault formatter runs
+// unchanged.
+func New(cfg *config.Config, v *vault.Vault) (*MemoryStore, error) {
 	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open database: %w", err)
@@ -35,7 +82,71 @@ func New(cfg *config.Config) (*MemoryStore, error) {
 		return nil, fmt.Errorf("embedder warmup failed: %w", err)
 	}
 
-	return &MemoryStore{db: database, embedder: embedder, config: cfg}, nil
+	var renderer llm.Renderer
+	if r := llm.NewFromConfig(cfg.LLMExport); r != nil {
+		renderer = r
+	}
+
+	return &MemoryStore{
+		db:       database,
+		embedder: embedder,
+		config:   cfg,
+		vault:    v,
+		renderer: renderer,
+	}, nil
+}
+
+// renderedBodyOrEmpty invokes the LLM renderer if one is configured and
+// returns its output, or "" on any failure (logged to stderr). Errors never
+// propagate: the store's contract is that a vault-side renderer outage must
+// not fail the DB write. Callers should fall through to Format() downstream
+// when the return is empty.
+func (s *MemoryStore) renderedBodyOrEmpty(content string) string {
+	if s.renderer == nil {
+		return ""
+	}
+	rendered, err := s.renderer.Render(context.Background(), content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[memo] llm render failed, falling back to deterministic: %v\n", err)
+		return ""
+	}
+	return rendered
+}
+
+// Vault returns the underlying vault handle, or nil if none is attached.
+func (s *MemoryStore) Vault() *vault.Vault { return s.vault }
+
+// ExportVault rewrites the entire vault from the current DB state. Used by
+// the `memo export` command.
+func (s *MemoryStore) ExportVault(opts vault.ExportOptions) (*vault.ExportResult, error) {
+	if s.vault == nil {
+		return nil, fmt.Errorf("vault is not configured")
+	}
+	mems, err := s.db.ListAll(listAllCap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list memories: %w", err)
+	}
+	return s.vault.ExportAll(mems, opts)
+}
+
+// syncVault runs the single-memory post-write hook. Errors are logged but not
+// propagated — a vault failure must never fail the DB write.
+func (s *MemoryStore) syncVault(m *model.Memory) {
+	if s.vault == nil {
+		return
+	}
+	if err := s.vault.Sync(m); err != nil {
+		fmt.Fprintf(os.Stderr, "[memo] vault sync failed for %s: %v\n", m.ID, err)
+	}
+}
+
+func (s *MemoryStore) deleteVault(id string) {
+	if s.vault == nil {
+		return
+	}
+	if err := s.vault.Delete(id); err != nil {
+		fmt.Fprintf(os.Stderr, "[memo] vault delete failed for %s: %v\n", id, err)
+	}
 }
 
 func (s *MemoryStore) Close() {
@@ -47,7 +158,12 @@ func (s *MemoryStore) Close() {
 	}
 }
 
-func (s *MemoryStore) Store(content string, tags []string, memType string) (*model.StoreResult, error) {
+// Store persists a new memory. The optional ctx map carries capture-time
+// context (e.g. git branch, ticket id, project) that is written into
+// frontmatter but deliberately NOT fed into model.GenerateID or the embedding
+// — IDs and semantic dedup stay a pure function of Content, so the same raw
+// text captured twice in different contexts still deduplicates.
+func (s *MemoryStore) Store(content string, tags []string, memType string, ctx map[string]string) (*model.StoreResult, error) {
 	if memType == "" {
 		memType = s.config.DefaultType
 	}
@@ -87,18 +203,21 @@ func (s *MemoryStore) Store(content string, tags []string, memType string) (*mod
 
 	now := model.NowRFC3339()
 	mem := &model.Memory{
-		ID:        id,
-		Content:   content,
-		Type:      memType,
-		Tags:      tags,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:           id,
+		Content:      content,
+		Type:         memType,
+		Tags:         tags,
+		Context:      ctx,
+		RenderedBody: s.renderedBodyOrEmpty(content),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	if err := s.db.Insert(mem, emb); err != nil {
 		return nil, err
 	}
 
+	s.syncVault(mem)
 	return &model.StoreResult{ID: id, Status: "created"}, nil
 }
 
@@ -124,6 +243,9 @@ func (s *MemoryStore) Delete(id string) (*model.DeleteResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if deleted {
+		s.deleteVault(id)
+	}
 	return &model.DeleteResult{Deleted: deleted, ID: id}, nil
 }
 
@@ -136,8 +258,10 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 		return &model.UpdateResult{Updated: false}, nil
 	}
 
-	if content != nil {
+	contentChanged := false
+	if content != nil && *content != mem.Content {
 		mem.Content = *content
+		contentChanged = true
 	}
 	if tags != nil {
 		mem.Tags = *tags
@@ -150,6 +274,13 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 	}
 	mem.UpdatedAt = model.NowRFC3339()
 
+	// Re-render only when content actually changed; otherwise the cached
+	// rendered body is still accurate and re-invoking the LLM just burns
+	// subscription quota without user-visible benefit.
+	if contentChanged {
+		mem.RenderedBody = s.renderedBodyOrEmpty(mem.Content)
+	}
+
 	emb, err := s.embedder.Embed(mem.Content)
 	if err != nil {
 		return nil, err
@@ -159,6 +290,7 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 		return nil, err
 	}
 
+	s.syncVault(mem)
 	return &model.UpdateResult{Updated: true, Memory: mem}, nil
 }
 
@@ -172,6 +304,171 @@ func (s *MemoryStore) List(limit int, memType *string) ([]model.Memory, error) {
 		}
 	}
 	return s.db.ListAll(limit, memType)
+}
+
+// ResolveID resolves either a full UUID or an 8-hex short-id (or a filename
+// containing one) to the canonical full UUID. An optional ".md" suffix is
+// stripped so callers can pass an Obsidian filename directly.
+func (s *MemoryStore) ResolveID(idOrShort string) (string, error) {
+	trim := strings.TrimSpace(idOrShort)
+	trim = strings.TrimSuffix(trim, ".md")
+	if len(trim) == 36 {
+		exists, err := s.db.Exists(trim)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return "", fmt.Errorf("no memory with id %s", trim)
+		}
+		return trim, nil
+	}
+	if len(trim) < 8 {
+		return "", fmt.Errorf("id %q too short: need 8-char short-id or 36-char UUID", idOrShort)
+	}
+	short := trim[:8]
+	for _, r := range short {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return "", fmt.Errorf("id %q must be hex", idOrShort)
+		}
+	}
+	m, err := s.db.FindByShortID(short)
+	if err != nil {
+		return "", err
+	}
+	if m == nil {
+		return "", fmt.Errorf("no memory matching %q", idOrShort)
+	}
+	return m.ID, nil
+}
+
+// ReconcileVault compares the vault on disk against the DB and reports which
+// memories should be deleted (files missing) and which should change type
+// (files in a different type folder). With opts.Apply=true, the diff is
+// committed directly to the DB — bypassing syncVault/deleteVault since the
+// filesystem is already authoritative for this class of change. Files whose
+// short-id does not correspond to any DB row are collected as Unknown and
+// never auto-deleted.
+func (s *MemoryStore) ReconcileVault(opts ReconcileOptions) (*ReconcileResult, error) {
+	if s.vault == nil {
+		return nil, fmt.Errorf("vault is not configured")
+	}
+	files, err := s.vault.WalkManaged()
+	if err != nil {
+		return nil, fmt.Errorf("walk vault: %w", err)
+	}
+	mems, err := s.db.ListAll(listAllCap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list memories: %w", err)
+	}
+
+	vaultByShort := make(map[string]vault.ManagedFile, len(files))
+	for _, f := range files {
+		vaultByShort[f.ShortID] = f
+	}
+	dbByShort := make(map[string]*model.Memory, len(mems))
+	for i := range mems {
+		dbByShort[vault.ShortID(mems[i].ID)] = &mems[i]
+	}
+
+	res := &ReconcileResult{
+		ToDelete:    []DeleteItem{},
+		TypeChanges: []TypeChange{},
+		Unknown:     []string{},
+	}
+
+	for i := range mems {
+		m := &mems[i]
+		short := vault.ShortID(m.ID)
+		f, ok := vaultByShort[short]
+		if !ok {
+			res.ToDelete = append(res.ToDelete, DeleteItem{
+				ID: m.ID, Title: vault.Title(m.Content),
+			})
+			continue
+		}
+		if f.TypeFolder != "" && f.TypeFolder != m.Type {
+			if err := s.config.ValidateType(f.TypeFolder); err != nil {
+				fmt.Fprintf(os.Stderr, "[memo] reconcile: skipping %s: moved to unknown type %q (%v)\n",
+					short, f.TypeFolder, err)
+				continue
+			}
+			res.TypeChanges = append(res.TypeChanges, TypeChange{
+				ID: m.ID, Title: vault.Title(m.Content),
+				OldType: m.Type, NewType: f.TypeFolder,
+			})
+		}
+	}
+
+	for short := range vaultByShort {
+		if _, ok := dbByShort[short]; !ok {
+			res.Unknown = append(res.Unknown, short)
+		}
+	}
+	sort.Strings(res.Unknown)
+
+	if !opts.Apply {
+		return res, nil
+	}
+
+	for _, item := range res.ToDelete {
+		if _, err := s.db.Delete(item.ID); err != nil {
+			return res, fmt.Errorf("delete %s: %w", item.ID, err)
+		}
+	}
+	for _, tc := range res.TypeChanges {
+		if err := s.db.UpdateType(tc.ID, tc.NewType); err != nil {
+			return res, fmt.Errorf("update type %s: %w", tc.ID, err)
+		}
+	}
+	res.Applied = true
+	return res, nil
+}
+
+// ReformatOneResult reports the outcome of a single-memory LLM refresh.
+type ReformatOneResult struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Rendered bool   `json:"rendered"`
+	Skipped  bool   `json:"skipped,omitempty"`
+}
+
+// ReformatOne re-runs the LLM render pipeline for exactly one memory and
+// writes the result back to the DB + vault. Single-memory scope is
+// intentional: bulk reformat is a blast-radius hazard because a single
+// invocation can burn large amounts of subscription quota and cascade a bad
+// prompt change across the entire knowledge base. Callers wanting to refresh
+// several memories must invoke this repeatedly with explicit IDs.
+//
+// Errors from the LLM propagate to the caller (no silent fallback): the user
+// explicitly asked for this render, so if claude failed they need to see why
+// rather than get a misleadingly "successful" unchanged file.
+func (s *MemoryStore) ReformatOne(id string) (*ReformatOneResult, error) {
+	if s.renderer == nil {
+		return nil, fmt.Errorf("llm_md_export is not enabled; set enabled: true in config.yaml")
+	}
+	m, err := s.db.Get(id)
+	if err != nil {
+		return nil, fmt.Errorf("get memory: %w", err)
+	}
+	if m == nil {
+		return nil, fmt.Errorf("no memory with id %s", id)
+	}
+
+	rendered, err := s.renderer.Render(context.Background(), m.Content)
+	if err != nil {
+		return nil, fmt.Errorf("llm render: %w", err)
+	}
+
+	title := vault.Title(m.Content)
+	if rendered == m.RenderedBody {
+		return &ReformatOneResult{ID: m.ID, Title: title, Skipped: true}, nil
+	}
+	if err := s.db.UpdateRenderedBody(m.ID, rendered); err != nil {
+		return nil, fmt.Errorf("db update: %w", err)
+	}
+	m.RenderedBody = rendered
+	s.syncVault(m)
+	return &ReformatOneResult{ID: m.ID, Title: title, Rendered: true}, nil
 }
 
 func (s *MemoryStore) FindSimilar(content string) ([]model.MemoryWithScore, error) {
