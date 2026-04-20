@@ -99,6 +99,104 @@ func TestRenderFrontmatter(t *testing.T) {
 	}
 }
 
+func TestRenderContextKeys(t *testing.T) {
+	m := &model.Memory{
+		ID:      "a1b2c3d4-e5f6-1111-2222-333333333333",
+		Content: "Incident context",
+		Type:    "incident",
+		Tags:    []string{"pendo-io"},
+		Context: map[string]string{
+			"project":  "pendo-io/pendo-appengine",
+			"branch":   "main",
+			"commit":   "38162e7",
+			"ticket":   "OPS-43243",
+			"pr":       "APP-149135",
+			"cwd_name": "pendo-appengine",
+			// Alphabetised unknown:
+			"zoneinfo": "us-east-1",
+			// Reserved key (must be ignored):
+			"type": "should-be-dropped",
+			// Empty value (must be ignored):
+			"skipme": "",
+		},
+		CreatedAt: "2026-04-20T10:00:00Z",
+		UpdatedAt: "2026-04-20T10:05:00Z",
+	}
+	out, err := Render(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+
+	// Known context keys are present in the pinned order.
+	idxProject := strings.Index(s, "project:")
+	idxBranch := strings.Index(s, "branch:")
+	idxCommit := strings.Index(s, "commit:")
+	idxTicket := strings.Index(s, "ticket:")
+	idxPR := strings.Index(s, "pr:")
+	idxCwd := strings.Index(s, "cwd_name:")
+	idxZone := strings.Index(s, "zoneinfo:")
+	for _, w := range []struct {
+		name string
+		idx  int
+	}{
+		{"project", idxProject},
+		{"branch", idxBranch},
+		{"commit", idxCommit},
+		{"ticket", idxTicket},
+		{"pr", idxPR},
+		{"cwd_name", idxCwd},
+		{"zoneinfo", idxZone},
+	} {
+		if w.idx < 0 {
+			t.Errorf("missing key %q in frontmatter:\n%s", w.name, s)
+		}
+	}
+	if idxProject > idxBranch || idxBranch > idxCommit || idxCommit > idxTicket ||
+		idxTicket > idxPR || idxPR > idxCwd || idxCwd > idxZone {
+		t.Errorf("context key order not preserved:\n%s", s)
+	}
+
+	// Reserved key override is silently dropped.
+	if strings.Contains(s, "should-be-dropped") {
+		t.Errorf("reserved key override leaked into frontmatter:\n%s", s)
+	}
+
+	// Empty value is omitted.
+	if strings.Contains(s, "skipme:") {
+		t.Errorf("empty-value key should not be emitted:\n%s", s)
+	}
+
+	// Base type field is still the memory's own type.
+	if !strings.Contains(s, "type: incident\n") {
+		t.Errorf("expected `type: incident` in frontmatter:\n%s", s)
+	}
+}
+
+func TestRenderNoContextMatchesOldLayout(t *testing.T) {
+	// Regression guard: Context nil/empty produces exactly the same
+	// frontmatter keys as before this feature was added.
+	m := &model.Memory{
+		ID:        "a1b2c3d4-e5f6-1111-2222-333333333333",
+		Content:   "Plain note",
+		Type:      "note",
+		Tags:      []string{"t1"},
+		CreatedAt: "2026-04-20T10:00:00Z",
+		UpdatedAt: "2026-04-20T10:00:00Z",
+	}
+	out, err := Render(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	// No stray context-only keys sneak in.
+	for _, forbidden := range []string{"project:", "branch:", "commit:", "ticket:", "pr:"} {
+		if strings.Contains(s, forbidden) {
+			t.Errorf("unexpected context key %q in context-free memory:\n%s", forbidden, s)
+		}
+	}
+}
+
 func TestRenderEmptyTags(t *testing.T) {
 	m := &model.Memory{
 		ID:        "abcd1234-0000-0000-0000-000000000000",

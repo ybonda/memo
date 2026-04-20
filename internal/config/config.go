@@ -27,14 +27,28 @@ type Config struct {
 	Embedding          EmbeddingConfig `yaml:"embedding"`
 	DuplicateThreshold float32         `yaml:"duplicate_threshold"`
 	Types              []TypeDef       `yaml:"types"`
+	// AutoCaptureContext controls whether `memo remember` shells out to git
+	// to populate branch/commit/project on ingest. Defaults to true. Uses a
+	// pointer so existing configs without the key still default to on after
+	// the backfill below (a plain bool would zero to false instead).
+	AutoCaptureContext *bool `yaml:"auto_capture_context,omitempty"`
 
 	// Derived fields (not in YAML)
 	TypeRegistry map[string]TypeDef `yaml:"-"`
 	DefaultType  string             `yaml:"-"`
 }
 
+// CaptureContext reports whether git auto-capture is enabled.
+func (c *Config) CaptureContext() bool {
+	if c.AutoCaptureContext == nil {
+		return true
+	}
+	return *c.AutoCaptureContext
+}
+
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
+	captureOn := true
 	return &Config{
 		DBPath:    filepath.Join(home, ".memo", "memories.db"),
 		VaultPath: filepath.Join(home, ".memo", "vault"),
@@ -44,6 +58,7 @@ func DefaultConfig() *Config {
 			CacheDir:   filepath.Join(home, ".memo", "models"),
 		},
 		DuplicateThreshold: 0.90,
+		AutoCaptureContext: &captureOn,
 		Types: []TypeDef{
 			{Name: "note", Description: "General observations, ideas, WIP thoughts", Default: true},
 			{Name: "bug", Description: "Bug reports, error patterns, known issues"},

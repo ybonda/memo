@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/ybonda/memo/internal/capture"
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/store"
 	"github.com/ybonda/memo/internal/version"
@@ -46,6 +47,11 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 		mcp.WithString("content", mcp.Required(), mcp.Description("The content to remember")),
 		mcp.WithString("type", mcp.Description("Memory type"), mcp.Enum(typeNames...)),
 		mcp.WithArray("tags", mcp.Description("Tags for the memory"), mcp.WithStringItems()),
+		mcp.WithObject("context", mcp.Description(
+			"Optional capture-context fields as a flat key/value map. "+
+				"Recognised keys include ticket, pr, project, related. "+
+				"Values override any git auto-capture on the same key.",
+		)),
 	), h.remember)
 
 	// memo_search
@@ -131,12 +137,39 @@ func (h *Handler) remember(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	memType := req.GetString("type", "")
 	tags := req.GetStringSlice("tags", nil)
 
-	result, err := h.store.Store(content, tags, memType)
+	ctx := mergeCaptureContext(h.config, req.GetArguments()["context"])
+
+	result, err := h.store.Store(content, tags, memType, ctx)
 	if err != nil {
 		logErr("memo_remember", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(result)
+}
+
+// mergeCaptureContext combines git auto-capture (from the server's cwd) with
+// caller-supplied context. MCP-supplied values win over auto-captured ones on
+// the same key. Returns nil when nothing was populated.
+func mergeCaptureContext(cfg *config.Config, raw any) map[string]string {
+	out := map[string]string{}
+	if cfg != nil && cfg.CaptureContext() {
+		if cwd, err := os.Getwd(); err == nil {
+			for k, v := range capture.Git(cwd) {
+				out[k] = v
+			}
+		}
+	}
+	if m, ok := raw.(map[string]any); ok {
+		for k, v := range m {
+			if s, ok := v.(string); ok && s != "" {
+				out[k] = s
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (h *Handler) search(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

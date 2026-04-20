@@ -71,7 +71,46 @@ func (d *DB) initSchema() error {
 			return fmt.Errorf("schema init failed: %w\nSQL: %s", err, s)
 		}
 	}
+	return d.migrateMemoriesColumns()
+}
+
+// migrateMemoriesColumns adds new columns to the memories table if they are
+// missing. SQLite's ADD COLUMN is not idempotent, so we check PRAGMA
+// table_info first. Existing rows get the DEFAULT value; downstream code can
+// treat the column as always present.
+func (d *DB) migrateMemoriesColumns() error {
+	existing, err := d.memoriesColumns()
+	if err != nil {
+		return err
+	}
+	if !existing["context_json"] {
+		if _, err := d.conn.Exec(
+			`ALTER TABLE memories ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'`,
+		); err != nil {
+			return fmt.Errorf("migrate context_json: %w", err)
+		}
+	}
 	return nil
+}
+
+func (d *DB) memoriesColumns() (map[string]bool, error) {
+	rows, err := d.conn.Query(`PRAGMA table_info(memories)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typeName string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typeName, &notnull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
 }
 
 func (d *DB) Insert(mem *model.Memory, embedding []float32) error {
@@ -82,10 +121,11 @@ func (d *DB) Insert(mem *model.Memory, embedding []float32) error {
 	defer tx.Rollback()
 
 	tagsJSON, _ := json.Marshal(mem.Tags)
+	contextJSON := marshalContext(mem.Context)
 
 	_, err = tx.Exec(
-		`INSERT INTO memories (id, content, type, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		mem.ID, mem.Content, mem.Type, string(tagsJSON), mem.CreatedAt, mem.UpdatedAt,
+		`INSERT INTO memories (id, content, type, tags, context_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		mem.ID, mem.Content, mem.Type, string(tagsJSON), contextJSON, mem.CreatedAt, mem.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
@@ -122,10 +162,11 @@ func (d *DB) Update(mem *model.Memory, embedding []float32) error {
 	defer tx.Rollback()
 
 	tagsJSON, _ := json.Marshal(mem.Tags)
+	contextJSON := marshalContext(mem.Context)
 
 	_, err = tx.Exec(
-		`UPDATE memories SET content = ?, type = ?, tags = ?, updated_at = ? WHERE id = ?`,
-		mem.Content, mem.Type, string(tagsJSON), mem.UpdatedAt, mem.ID,
+		`UPDATE memories SET content = ?, type = ?, tags = ?, context_json = ?, updated_at = ? WHERE id = ?`,
+		mem.Content, mem.Type, string(tagsJSON), contextJSON, mem.UpdatedAt, mem.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update memory: %w", err)
@@ -190,7 +231,7 @@ func (d *DB) Exists(id string) (bool, error) {
 
 func (d *DB) Get(id string) (*model.Memory, error) {
 	row := d.conn.QueryRow(
-		`SELECT id, content, type, tags, created_at, updated_at FROM memories WHERE id = ?`, id,
+		`SELECT id, content, type, tags, context_json, created_at, updated_at FROM memories WHERE id = ?`, id,
 	)
 	return scanMemory(row)
 }
@@ -201,7 +242,7 @@ func (d *DB) Get(id string) (*model.Memory, error) {
 // first match is returned.
 func (d *DB) FindByShortID(short string) (*model.Memory, error) {
 	row := d.conn.QueryRow(
-		`SELECT id, content, type, tags, created_at, updated_at FROM memories WHERE id LIKE ? LIMIT 1`,
+		`SELECT id, content, type, tags, context_json, created_at, updated_at FROM memories WHERE id LIKE ? LIMIT 1`,
 		short+"%",
 	)
 	return scanMemory(row)
@@ -238,7 +279,7 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 	var rows *sql.Rows
 	if memType != nil {
 		rows, err = d.conn.Query(
-			`SELECT m.id, m.content, m.type, m.tags, m.created_at, m.updated_at, v.distance
+			`SELECT m.id, m.content, m.type, m.tags, m.context_json, m.created_at, m.updated_at, v.distance
 			FROM memories_vec v
 			JOIN memory_vectors mv ON mv.vec_rowid = v.rowid
 			JOIN memories m ON m.id = mv.memory_id
@@ -248,7 +289,7 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 		)
 	} else {
 		rows, err = d.conn.Query(
-			`SELECT m.id, m.content, m.type, m.tags, m.created_at, m.updated_at, v.distance
+			`SELECT m.id, m.content, m.type, m.tags, m.context_json, m.created_at, m.updated_at, v.distance
 			FROM memories_vec v
 			JOIN memory_vectors mv ON mv.vec_rowid = v.rowid
 			JOIN memories m ON m.id = mv.memory_id
@@ -265,10 +306,10 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 	var results []model.MemoryWithScore
 	for rows.Next() {
 		var (
-			id, content, typ, tagsJSON, createdAt, updatedAt string
-			distance                                         float64
+			id, content, typ, tagsJSON, contextJSON, createdAt, updatedAt string
+			distance                                                      float64
 		)
-		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &createdAt, &updatedAt, &distance); err != nil {
+		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &createdAt, &updatedAt, &distance); err != nil {
 			return nil, err
 		}
 		var tags []string
@@ -282,6 +323,7 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 			Content:   content,
 			Type:      typ,
 			Tags:      tags,
+			Context:   unmarshalContext(contextJSON),
 			CreatedAt: createdAt,
 			UpdatedAt: updatedAt,
 			Score:     float32(1.0 - distance),
@@ -296,12 +338,12 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 
 	if memType != nil {
 		rows, err = d.conn.Query(
-			`SELECT id, content, type, tags, created_at, updated_at FROM memories WHERE type = ? ORDER BY updated_at DESC LIMIT ?`,
+			`SELECT id, content, type, tags, context_json, created_at, updated_at FROM memories WHERE type = ? ORDER BY updated_at DESC LIMIT ?`,
 			*memType, limit,
 		)
 	} else {
 		rows, err = d.conn.Query(
-			`SELECT id, content, type, tags, created_at, updated_at FROM memories ORDER BY updated_at DESC LIMIT ?`,
+			`SELECT id, content, type, tags, context_json, created_at, updated_at FROM memories ORDER BY updated_at DESC LIMIT ?`,
 			limit,
 		)
 	}
@@ -312,8 +354,8 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 
 	var results []model.Memory
 	for rows.Next() {
-		var id, content, typ, tagsJSON, createdAt, updatedAt string
-		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &createdAt, &updatedAt); err != nil {
+		var id, content, typ, tagsJSON, contextJSON, createdAt, updatedAt string
+		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		var tags []string
@@ -327,6 +369,7 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 			Content:   content,
 			Type:      typ,
 			Tags:      tags,
+			Context:   unmarshalContext(contextJSON),
 			CreatedAt: createdAt,
 			UpdatedAt: updatedAt,
 		})
@@ -335,8 +378,8 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 }
 
 func scanMemory(row *sql.Row) (*model.Memory, error) {
-	var id, content, typ, tagsJSON, createdAt, updatedAt string
-	err := row.Scan(&id, &content, &typ, &tagsJSON, &createdAt, &updatedAt)
+	var id, content, typ, tagsJSON, contextJSON, createdAt, updatedAt string
+	err := row.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -353,7 +396,36 @@ func scanMemory(row *sql.Row) (*model.Memory, error) {
 		Content:   content,
 		Type:      typ,
 		Tags:      tags,
+		Context:   unmarshalContext(contextJSON),
 		CreatedAt: createdAt,
 		UpdatedAt: updatedAt,
 	}, nil
+}
+
+// marshalContext returns the JSON encoding of a Context map. A nil or empty
+// map is encoded as `{}` so the stored column always has valid JSON.
+func marshalContext(ctx map[string]string) string {
+	if len(ctx) == 0 {
+		return "{}"
+	}
+	data, err := json.Marshal(ctx)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+// unmarshalContext returns the parsed Context map, or nil if the stored JSON
+// is empty. Nil is the in-memory convention for "no context"; an empty map
+// would serialize as `{}` on write and be indistinguishable from "context
+// exists but is empty", so we normalize to nil on read.
+func unmarshalContext(s string) map[string]string {
+	if s == "" || s == "{}" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(s), &m); err != nil || len(m) == 0 {
+		return nil
+	}
+	return m
 }

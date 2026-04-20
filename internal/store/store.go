@@ -125,7 +125,12 @@ func (s *MemoryStore) Close() {
 	}
 }
 
-func (s *MemoryStore) Store(content string, tags []string, memType string) (*model.StoreResult, error) {
+// Store persists a new memory. The optional ctx map carries capture-time
+// context (e.g. git branch, ticket id, project) that is written into
+// frontmatter but deliberately NOT fed into model.GenerateID or the embedding
+// — IDs and semantic dedup stay a pure function of Content, so the same raw
+// text captured twice in different contexts still deduplicates.
+func (s *MemoryStore) Store(content string, tags []string, memType string, ctx map[string]string) (*model.StoreResult, error) {
 	if memType == "" {
 		memType = s.config.DefaultType
 	}
@@ -169,6 +174,7 @@ func (s *MemoryStore) Store(content string, tags []string, memType string) (*mod
 		Content:   content,
 		Type:      memType,
 		Tags:      tags,
+		Context:   ctx,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
