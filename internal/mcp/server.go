@@ -65,9 +65,9 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 
 	// memo_forget
 	srv.AddTool(mcp.NewTool("memo_forget",
-		mcp.WithDescription("Delete a memory by ID"),
+		mcp.WithDescription("Delete a memory by full UUID or 8-hex short-id (the prefix on Obsidian filenames)"),
 		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("id", mcp.Required(), mcp.Description("Memory ID to delete")),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Full UUID (36 chars) or 8-hex short-id prefix")),
 	), h.forget)
 
 	// memo_update
@@ -93,6 +93,13 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Content to compare")),
 	), h.similar)
+
+	// memo_reconcile
+	srv.AddTool(mcp.NewTool("memo_reconcile",
+		mcp.WithDescription("Reflect Obsidian deletes and type-folder moves back into the DB. Dry-run by default; set apply=true to commit."),
+		mcp.WithDestructiveHintAnnotation(true),
+		mcp.WithBoolean("apply", mcp.Description("If true, commit the diff; otherwise preview only")),
+	), h.reconcile)
 
 	stdioSrv := server.NewStdioServer(srv)
 
@@ -165,10 +172,25 @@ func (h *Handler) recall(_ context.Context, req mcp.CallToolRequest) (*mcp.CallT
 }
 
 func (h *Handler) forget(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id := req.GetString("id", "")
+	idOrShort := req.GetString("id", "")
 
+	id, err := h.store.ResolveID(idOrShort)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 	result, err := h.store.Delete(id)
 	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+func (h *Handler) reconcile(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	apply := req.GetBool("apply", false)
+
+	result, err := h.store.ReconcileVault(store.ReconcileOptions{Apply: apply})
+	if err != nil {
+		logErr("memo_reconcile", err)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(result)

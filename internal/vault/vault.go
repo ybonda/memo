@@ -217,6 +217,62 @@ func (v *Vault) syncOne(m *model.Memory, rename, dryRun bool) (*ExportEvent, err
 	return &ExportEvent{Action: action, ID: m.ID, Path: writePath}, nil
 }
 
+// ManagedFile describes a .md file in the vault whose basename shape matches
+// a memo-managed memory (8-hex short-id prefix). User-authored files never
+// appear here.
+type ManagedFile struct {
+	ShortID    string `json:"short_id"`
+	TypeFolder string `json:"type_folder"`
+	Path       string `json:"path"`
+}
+
+// WalkManaged walks the vault and returns every .md file whose basename
+// begins with an 8-hex short-id. Files at the vault root report an empty
+// TypeFolder; files nested deeper than one level below the root are skipped.
+// User-authored files (basename without the short-id shape) are omitted by
+// construction, mirroring the invariant enforced by findOrphans.
+func (v *Vault) WalkManaged() ([]ManagedFile, error) {
+	var out []ManagedFile
+	err := filepath.WalkDir(v.path, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if path != v.path && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(d.Name()) != ".md" {
+			return nil
+		}
+		short := shortIDFromFilename(d.Name())
+		if short == "" {
+			return nil
+		}
+		parent := filepath.Dir(path)
+		typeFolder := ""
+		switch {
+		case parent == v.path:
+			typeFolder = ""
+		case filepath.Dir(parent) == v.path:
+			typeFolder = filepath.Base(parent)
+		default:
+			return nil // nested deeper than one level; ignore
+		}
+		out = append(out, ManagedFile{
+			ShortID:    short,
+			TypeFolder: typeFolder,
+			Path:       path,
+		})
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return out, nil
+}
+
 // findByShortID searches every type folder for a file whose short-id prefix
 // matches. Returns "" if no match. At most one match is expected given the
 // 2^32-space of short-ids; the first is returned if somehow more exist.

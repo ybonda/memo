@@ -38,6 +38,7 @@ memo
 │   ├── recall.go                    # Formatted context for LLM prompts
 │   ├── similar.go                   # Deduplication search
 │   ├── export.go                    # Full Obsidian vault rebuild (--rename, --dry-run)
+│   ├── reconcile.go                 # Apply Obsidian deletes and type-folder moves to the DB
 │   └── serve.go                     # MCP server over stdio
 ├── internal/
 │   ├── config/config.go             # YAML config + type registry
@@ -50,10 +51,12 @@ memo
 │   │   ├── format.go                # Human-readable terminal output (colored cards, relative time)
 │   │   └── format_test.go           # Output formatting tests
 │   ├── vault/
-│   │   ├── vault.go                 # Obsidian vault projection: Sync, Delete, ExportAll, prune
+│   │   ├── vault.go                 # Obsidian vault projection: Sync, Delete, ExportAll, WalkManaged, prune
 │   │   ├── filename.go              # ShortID, Slugify, Title (NFC-normalized, ASCII-clamped)
-│   │   ├── frontmatter.go           # YAML frontmatter rendering via yaml.v3
-│   │   └── vault_test.go            # Filename, slug, frontmatter, move, prune tests
+│   │   ├── frontmatter.go           # YAML frontmatter rendering via yaml.v3; body runs through Format
+│   │   ├── formatter.go             # Deterministic markdown shaping: bold lead-ins, (N)→list, backticks
+│   │   ├── formatter_test.go        # Table-driven formatter tests + incident golden
+│   │   └── vault_test.go            # Filename, slug, frontmatter, move, prune, WalkManaged tests
 │   ├── mcp/server.go                # MCP server: tool registration + handlers
 │   └── store/store.go               # MemoryStore business logic
 └── Makefile
@@ -62,13 +65,13 @@ memo
 ### Package responsibilities
 
 - **cmd/** — One file per Cobra command. `root.go` loads config, constructs the vault, manages store lifecycle via `PersistentPreRunE`/`PersistentPostRun`, and provides `useJSON()` which auto-detects TTY via `go-isatty` (or honors `--json` flag).
-- **internal/store/** — Core business logic. Orchestrates embedding, two-tier duplicate detection, DB operations, and post-write vault sync. `New(cfg, v)` accepts an optional `*vault.Vault`; nil disables export. `Store`/`Update`/`Delete` invoke the vault hook only on actual mutations; errors log to stderr but never fail the DB write.
+- **internal/store/** — Core business logic. Orchestrates embedding, two-tier duplicate detection, DB operations, and post-write vault sync. `New(cfg, v)` accepts an optional `*vault.Vault`; nil disables export. `Store`/`Update`/`Delete` invoke the vault hook only on actual mutations; errors log to stderr but never fail the DB write. `ResolveID` accepts either a full UUID or an 8-hex short-id (with an optional `.md` suffix) and returns the canonical full UUID. `ReconcileVault` diffs the vault against the DB and, with `Apply=true`, commits deletes and type changes directly via `db.Delete`/`db.UpdateType` — the `syncVault`/`deleteVault` hooks are deliberately bypassed so the authoritative filesystem state is not echoed back.
 - **internal/db/** — SQLite + sqlite-vec. Three tables: `memories` (content), `memories_vec` (float[384] cosine KNN), `memory_vectors` (ID↔rowid bridge). All mutations use transactions.
 - **internal/embedding/** — Runs `BAAI/bge-small-en-v1.5` locally via hugot/GoMLX. Model auto-downloads on first use to `~/.memo/models/`.
 - **internal/format/** — Human-readable terminal output. Colored type badges, relative timestamps (`3d ago`), short IDs, and score percentages. Uses `fatih/color`.
-- **internal/vault/** — One-way projection of DB state into `~/.memo/vault/` as Markdown files. Layout is `<vault>/<type>/<short-id>-<slug>.md`; slugs are frozen at first write and filenames stay stable across content edits (glob lookup by short-id). `Sync` is the post-write hook; `ExportAll` runs full rebuilds with optional `Rename` and `DryRun`. Pruning is shape-aware: only files whose basename starts with an 8-hex short-id are candidates, so user-authored `.md` files survive.
+- **internal/vault/** — Projection of DB state into `~/.memo/vault/` as Markdown files. Layout is `<vault>/<type>/<short-id>-<slug>.md`; slugs are frozen at first write and filenames stay stable across content edits (glob lookup by short-id). `Sync` is the post-write hook; `ExportAll` runs full rebuilds with optional `Rename` and `DryRun`. `WalkManaged` enumerates every `.md` file whose basename matches the short-id shape, grouped by type folder, so the store's reconcile pass can diff vault against DB. `Render` pipes the memory body through `Format` before emitting the `.md` file; `Format` adds deterministic markdown structure without mutating the raw content stored in the DB. Pruning and reconcile are both shape-aware: only files whose basename starts with an 8-hex short-id are candidates, so user-authored `.md` files survive.
 - **internal/model/** — Data structs and SHA256→UUID deterministic ID generation.
-- **internal/mcp/** — MCP server over stdio using `mcp-go`. Registers 7 tools that delegate to `MemoryStore`. Handles its own lifecycle via `cmd/serve.go` (bypasses root's `PersistentPreRunE`). Dynamic type enums from config. All errors returned as tool-level results, never protocol-level. Vault sync happens transparently through the store hook; there is no dedicated MCP tool.
+- **internal/mcp/** — MCP server over stdio using `mcp-go`. Registers 8 tools that delegate to `MemoryStore`. Handles its own lifecycle via `cmd/serve.go` (bypasses root's `PersistentPreRunE`). Dynamic type enums from config. All errors returned as tool-level results, never protocol-level. The `memo_forget` handler routes its `id` argument through `store.ResolveID`, so short-id prefixes (the 8 hex chars on Obsidian filenames) are accepted. The `memo_reconcile` tool surfaces the vault-to-DB diff to the agent; `apply=false` is a dry-run, `apply=true` commits.
 - **internal/config/** — YAML config at `~/.memo/config.yaml`, auto-created on first run. Memory types are config-driven and validated at runtime. `vault_path` defaults to `~/.memo/vault/` and is backfilled for configs written before this field existed.
 
 ### Data flow
@@ -115,6 +118,7 @@ Three tables in `~/.memo/memories.db`:
 - **Embeddings re-generated on update**: Content changes always recompute the vector.
 - **MCP server lifecycle**: `cmd/serve.go` overrides root's `PersistentPreRunE` with a no-op and manages its own `store.New()` + `defer Close()`. The store stays warm for the entire stdio session — single model load, persistent DB connection.
 - **MCP error convention**: All handlers return `(result, nil)`. Business errors use `mcp.NewToolResultError()` so Claude sees error text as tool output, keeping the JSON-RPC protocol clean.
-- **Vault is a one-way projection**: DB is the sole source of truth. `remember`/`update`/`forget` auto-sync through the store's post-write hook; edits made inside Obsidian are silently overwritten on the next sync. This sidesteps conflict resolution and keeps content-addressed IDs sound (bidirectional sync would require decoupling logical identity from content hash).
+- **Vault sync is split by concern**: content is one-way (DB → vault), structural metadata is two-way but only on demand. `remember`/`update`/`forget` auto-sync their `.md` file through the store's post-write hook; body edits made inside Obsidian are silently overwritten on the next sync (this sidesteps conflict resolution and keeps content-addressed IDs sound). Two structural edits made inside Obsidian are authoritative but applied only when the user runs `memo reconcile`: **deleting a file** (triggers `db.Delete`) and **moving a file to a different type folder** (triggers `db.UpdateType`). Reconcile's apply path calls `db.Delete`/`db.UpdateType` directly and skips `syncVault`/`deleteVault` so the filesystem state does not echo back onto itself. Files whose short-id matches no DB row are collected as `Unknown` and never auto-deleted.
+- **Formatter is deterministic and always-on**: `internal/vault/formatter.go:Format` is a pure function invoked by `Render` before the body is written. It adds structural markdown only (bolded ALL-CAPS lead-in labels, real numbered lists from inline `(N)` enumerations, paragraph splits at sentence boundaries, backticks on hyphenated-lowercase identifiers) without touching `m.Content`. The raw content in the DB remains the single source for SHA256 IDs and embeddings. Short inputs (< 200 runes) and inputs that already contain structural markdown (blank lines, headings, lists, bold, or fenced code) short-circuit to unchanged, so hand-written markdown passes through byte-for-byte and the formatter is idempotent on its own output.
 - **Frozen slug + glob lookup**: Filename is `<short-id>-<slug>.md` with `<short-id>` being the first 8 hex chars of the UUID. The slug is generated at first write and never automatically regenerated (`memo export --rename` is the explicit opt-in). Existing files are found by globbing `<short-id>-*.md` across type folders, so content edits never rename files and Obsidian wikilinks remain stable.
 - **Vault errors never fail writes**: `syncVault`/`deleteVault` log to stderr and swallow errors. A vault outage (iCloud offline, disk full) must never prevent a memory from being stored in the DB.

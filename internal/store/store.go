@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ybonda/memo/internal/config"
@@ -11,6 +12,35 @@ import (
 	"github.com/ybonda/memo/internal/model"
 	"github.com/ybonda/memo/internal/vault"
 )
+
+// ReconcileOptions controls a vault-to-DB reconcile pass.
+type ReconcileOptions struct {
+	// Apply commits the diff. Without it, ReconcileVault is purely read-only
+	// (dry-run) and callers can preview intended changes.
+	Apply bool
+}
+
+// DeleteItem describes a memory the reconcile pass would delete.
+type DeleteItem struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// TypeChange describes a memory whose type folder has changed in the vault.
+type TypeChange struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	OldType string `json:"old_type"`
+	NewType string `json:"new_type"`
+}
+
+// ReconcileResult summarizes a reconcile pass.
+type ReconcileResult struct {
+	Applied     bool         `json:"applied"`
+	ToDelete    []DeleteItem `json:"to_delete"`
+	TypeChanges []TypeChange `json:"type_changes"`
+	Unknown     []string     `json:"unknown"`
+}
 
 // listAllCap is the effective upper bound used when the store needs to
 // iterate every memory (e.g. full vault export). SQLite's LIMIT requires a
@@ -225,6 +255,124 @@ func (s *MemoryStore) List(limit int, memType *string) ([]model.Memory, error) {
 		}
 	}
 	return s.db.ListAll(limit, memType)
+}
+
+// ResolveID resolves either a full UUID or an 8-hex short-id (or a filename
+// containing one) to the canonical full UUID. An optional ".md" suffix is
+// stripped so callers can pass an Obsidian filename directly.
+func (s *MemoryStore) ResolveID(idOrShort string) (string, error) {
+	trim := strings.TrimSpace(idOrShort)
+	trim = strings.TrimSuffix(trim, ".md")
+	if len(trim) == 36 {
+		exists, err := s.db.Exists(trim)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return "", fmt.Errorf("no memory with id %s", trim)
+		}
+		return trim, nil
+	}
+	if len(trim) < 8 {
+		return "", fmt.Errorf("id %q too short: need 8-char short-id or 36-char UUID", idOrShort)
+	}
+	short := trim[:8]
+	for _, r := range short {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return "", fmt.Errorf("id %q must be hex", idOrShort)
+		}
+	}
+	m, err := s.db.FindByShortID(short)
+	if err != nil {
+		return "", err
+	}
+	if m == nil {
+		return "", fmt.Errorf("no memory matching %q", idOrShort)
+	}
+	return m.ID, nil
+}
+
+// ReconcileVault compares the vault on disk against the DB and reports which
+// memories should be deleted (files missing) and which should change type
+// (files in a different type folder). With opts.Apply=true, the diff is
+// committed directly to the DB — bypassing syncVault/deleteVault since the
+// filesystem is already authoritative for this class of change. Files whose
+// short-id does not correspond to any DB row are collected as Unknown and
+// never auto-deleted.
+func (s *MemoryStore) ReconcileVault(opts ReconcileOptions) (*ReconcileResult, error) {
+	if s.vault == nil {
+		return nil, fmt.Errorf("vault is not configured")
+	}
+	files, err := s.vault.WalkManaged()
+	if err != nil {
+		return nil, fmt.Errorf("walk vault: %w", err)
+	}
+	mems, err := s.db.ListAll(listAllCap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list memories: %w", err)
+	}
+
+	vaultByShort := make(map[string]vault.ManagedFile, len(files))
+	for _, f := range files {
+		vaultByShort[f.ShortID] = f
+	}
+	dbByShort := make(map[string]*model.Memory, len(mems))
+	for i := range mems {
+		dbByShort[vault.ShortID(mems[i].ID)] = &mems[i]
+	}
+
+	res := &ReconcileResult{
+		ToDelete:    []DeleteItem{},
+		TypeChanges: []TypeChange{},
+		Unknown:     []string{},
+	}
+
+	for i := range mems {
+		m := &mems[i]
+		short := vault.ShortID(m.ID)
+		f, ok := vaultByShort[short]
+		if !ok {
+			res.ToDelete = append(res.ToDelete, DeleteItem{
+				ID: m.ID, Title: vault.Title(m.Content),
+			})
+			continue
+		}
+		if f.TypeFolder != "" && f.TypeFolder != m.Type {
+			if err := s.config.ValidateType(f.TypeFolder); err != nil {
+				fmt.Fprintf(os.Stderr, "[memo] reconcile: skipping %s: moved to unknown type %q (%v)\n",
+					short, f.TypeFolder, err)
+				continue
+			}
+			res.TypeChanges = append(res.TypeChanges, TypeChange{
+				ID: m.ID, Title: vault.Title(m.Content),
+				OldType: m.Type, NewType: f.TypeFolder,
+			})
+		}
+	}
+
+	for short := range vaultByShort {
+		if _, ok := dbByShort[short]; !ok {
+			res.Unknown = append(res.Unknown, short)
+		}
+	}
+	sort.Strings(res.Unknown)
+
+	if !opts.Apply {
+		return res, nil
+	}
+
+	for _, item := range res.ToDelete {
+		if _, err := s.db.Delete(item.ID); err != nil {
+			return res, fmt.Errorf("delete %s: %w", item.ID, err)
+		}
+	}
+	for _, tc := range res.TypeChanges {
+		if err := s.db.UpdateType(tc.ID, tc.NewType); err != nil {
+			return res, fmt.Errorf("update type %s: %w", tc.ID, err)
+		}
+	}
+	res.Applied = true
+	return res, nil
 }
 
 func (s *MemoryStore) FindSimilar(content string) ([]model.MemoryWithScore, error) {

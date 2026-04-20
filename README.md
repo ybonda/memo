@@ -179,13 +179,15 @@ memo export
 
 Then open `~/.memo/vault/` in Obsidian.
 
+If you are upgrading across the version that introduced the body formatter, `memo export` also re-renders existing files with the new structure (bolded lead-in labels, numbered lists promoted from `(1)(2)(3)` markers, backticks on hyphenated identifiers). Filenames stay stable; only bodies change.
+
 ### 3. Restart your MCP client
 
 Claude Code, Cursor, and other MCP clients spawn `memo serve` as a long-running child process. After upgrading the binary, restart the client (or the `memo serve` process directly) so it picks up the new version.
 
 ## MCP Tools
 
-The MCP server exposes seven tools to the agent:
+The MCP server exposes eight tools to the agent:
 
 | Tool | What it does |
 |------|-------------|
@@ -195,7 +197,8 @@ The MCP server exposes seven tools to the agent:
 | `memo_list` | List memories by recency |
 | `memo_similar` | Find near-duplicates |
 | `memo_update` | Update content, type, or tags |
-| `memo_forget` | Delete a memory by ID |
+| `memo_forget` | Delete a memory by full UUID or 8-hex short-id (Obsidian filename prefix) |
+| `memo_reconcile` | Reflect Obsidian deletes and type-folder moves back into the DB |
 
 The server keeps the embedding model and database connection warm for the entire session — tool calls complete in milliseconds.
 
@@ -287,6 +290,9 @@ memo similar --content "Go channels enable CSP-style concurrency"
 memo update --id 31940748-a1b2-c3d4-e5f6-119922334455 --tags "go,concurrency,channels,goroutines"
 memo forget --id 80035334-f6e5-d4c3-b2a1-554433221100
 
+# forget also accepts the 8-hex short-id you see on Obsidian filenames
+memo forget --id 80035334
+
 # Rebuild the Obsidian vault from the DB (first-time setup or after pointing vault_path elsewhere)
 memo export
 
@@ -295,6 +301,12 @@ memo export --dry-run
 
 # Regenerate frozen slugs from current content (rare; after heavy content rewrites)
 memo export --rename
+
+# Preview deletes and type-folder moves made inside Obsidian
+memo reconcile
+
+# Apply them to the DB
+memo reconcile --apply
 ```
 
 Terminal output renders as colored cards with relative timestamps:
@@ -317,8 +329,9 @@ Terminal output renders as colored cards with relative timestamps:
 | `memo recall` | `--query` (required), `--limit` | Returns pre-formatted `context` string + raw memory data |
 | `memo similar` | `--content` (required) | Returns 5 most similar memories with scores |
 | `memo update` | `--id` (required), `--content`, `--type`, `--tags` | Only provided fields change; re-embeds on content change |
-| `memo forget` | `--id` (required) | Permanent delete |
+| `memo forget` | `--id` (required) | Permanent delete. `--id` accepts full UUID or 8-hex short-id prefix |
 | `memo export` | `--rename`, `--dry-run` | Full rebuild of the Obsidian vault from the DB; prunes orphans. Normal writes auto-sync without this command |
+| `memo reconcile` | `--apply` | Applies Obsidian-side deletes and type-folder moves to the DB. Dry-run by default |
 | `memo serve` | | Starts MCP server over stdio |
 
 ## Obsidian Vault
@@ -359,7 +372,11 @@ First memo about SQLite
 
 Obsidian's Properties UI recognizes `tags`, `created`, and `updated` natively. Use `title` as the display column in your file browser.
 
-**One-way semantics:** the DB is the sole source of truth. Every `remember` / `update` / `forget` (CLI or MCP) syncs the affected `.md` file automatically. Manual edits inside Obsidian are silently overwritten on the next sync. To change a memory's content, use `memo update` (or ask your agent to).
+**Sync semantics:** the DB is the source of truth for *memory content*. Every `remember` / `update` / `forget` (CLI or MCP) syncs the affected `.md` file automatically, and manual edits to a file's *body* are silently overwritten on the next sync. To change a memory's content, use `memo update` (or ask your agent to).
+
+Two structural changes you can make inside Obsidian are applied back to the DB when you explicitly ask for it: **deleting a file** removes the memory, and **moving a file to a different type folder** changes the memory's type. Run `memo reconcile` to preview and `memo reconcile --apply` to commit. Body edits are still ignored by reconcile.
+
+**Body formatting:** when `memo` writes a file, it runs the content through a small deterministic formatter that bolds ALL-CAPS lead-in labels (`KEY LESSON:`, `ROOT CAUSE:`), promotes inline `(1)(2)(3)` enumerations into real numbered lists, splits long paragraphs at sentence boundaries, and wraps hyphenated identifiers like `jobs-guideevents` in backticks. The raw content stored in the DB is untouched, so embeddings and IDs are unaffected. If you already write markdown (blank lines, lists, bold, or fenced code), the formatter leaves your text exactly as-is.
 
 **When to run `memo export` manually:**
 
@@ -368,7 +385,16 @@ Obsidian's Properties UI recognizes `tags`, `created`, and `updated` natively. U
 - To prune orphan `.md` files left behind by a failed hook (rare; iCloud offline, permission error)
 - With `--rename` after heavy content rewrites, to refresh stale slugs
 
-User-authored `.md` files in the vault (any filename that doesn't start with an 8-hex short-id) are left untouched by `memo export`, so you can add your own notes alongside the generated ones.
+User-authored `.md` files in the vault (any filename that doesn't start with an 8-hex short-id) are left untouched by `memo export` and `memo reconcile`, so you can add your own notes alongside the generated ones.
+
+**Instant delete from Obsidian (optional):** if you want Obsidian-triggered deletes to propagate immediately without running `memo reconcile`, install the [Shell Commands](https://github.com/Taitava/obsidian-shellcommands) community plugin and add one command:
+
+| Field | Value |
+|---|---|
+| Event | On file deleted |
+| Shell command | `memo forget --id {{file_name:no_extension}}` |
+
+`memo forget` accepts the 8-hex short-id prefix, so any Obsidian filename works directly.
 
 ## Design
 

@@ -299,6 +299,55 @@ func TestExportAllUnchangedCount(t *testing.T) {
 	}
 }
 
+func TestWalkManaged(t *testing.T) {
+	v := newTestVault(t)
+
+	// Managed files in a type folder
+	m1 := mem("a1b2c3d4-0000-0000-0000-000000000000", "note", "First")
+	m2 := mem("deadbeef-0000-0000-0000-000000000000", "architecture", "Second")
+	if err := v.Sync(m1); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Sync(m2); err != nil {
+		t.Fatal(err)
+	}
+
+	// User-authored file with memo-incompatible name: must be ignored
+	userFile := filepath.Join(v.Path(), "note", "my-personal-notes.md")
+	if err := os.WriteFile(userFile, []byte("body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nested file too deep: must be ignored
+	nestedDir := filepath.Join(v.Path(), "note", "archive")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nestedFile := filepath.Join(nestedDir, "cafebabe-nested.md")
+	if err := os.WriteFile(nestedFile, []byte("body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := v.WalkManaged()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 managed files, got %d: %+v", len(got), got)
+	}
+
+	byShort := map[string]ManagedFile{}
+	for _, f := range got {
+		byShort[f.ShortID] = f
+	}
+	if byShort["a1b2c3d4"].TypeFolder != "note" {
+		t.Errorf("expected note type folder, got %q", byShort["a1b2c3d4"].TypeFolder)
+	}
+	if byShort["deadbeef"].TypeFolder != "architecture" {
+		t.Errorf("expected architecture type folder, got %q", byShort["deadbeef"].TypeFolder)
+	}
+}
+
 func TestShortIDFromFilename(t *testing.T) {
 	cases := []struct {
 		in, want string

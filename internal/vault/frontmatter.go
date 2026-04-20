@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -23,8 +24,8 @@ type frontmatter struct {
 }
 
 // Render produces the full .md file contents for a memory: a YAML frontmatter
-// block fenced by "---" lines, a blank line, then the raw content body with a
-// guaranteed trailing newline.
+// block fenced by "---" lines, a blank line, then the content body run through
+// Format for structural markdown shaping, with a guaranteed trailing newline.
 func Render(m *model.Memory) ([]byte, error) {
 	fm := frontmatter{
 		ID:      m.ID,
@@ -48,12 +49,14 @@ func Render(m *model.Memory) ([]byte, error) {
 		return nil, fmt.Errorf("close encoder: %w", err)
 	}
 
+	body := Format(m.Content)
+
 	var out bytes.Buffer
 	out.WriteString("---\n")
 	out.Write(yamlBuf.Bytes())
 	out.WriteString("---\n\n")
-	out.WriteString(m.Content)
-	if !bytes.HasSuffix([]byte(m.Content), []byte("\n")) {
+	out.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
 		out.WriteByte('\n')
 	}
 	return out.Bytes(), nil

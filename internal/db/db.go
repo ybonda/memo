@@ -195,6 +195,40 @@ func (d *DB) Get(id string) (*model.Memory, error) {
 	return scanMemory(row)
 }
 
+// FindByShortID returns the memory whose UUID begins with the given 8-hex
+// short-id, or (nil, nil) if none match. Short-id collisions are theoretically
+// possible (2^32 space) but practically absent at personal-vault sizes; the
+// first match is returned.
+func (d *DB) FindByShortID(short string) (*model.Memory, error) {
+	row := d.conn.QueryRow(
+		`SELECT id, content, type, tags, created_at, updated_at FROM memories WHERE id LIKE ? LIMIT 1`,
+		short+"%",
+	)
+	return scanMemory(row)
+}
+
+// UpdateType changes a memory's type and bumps updated_at. The embedding is
+// not regenerated because content is unchanged. Used by reconcile when a file
+// has been moved between type folders inside the vault.
+func (d *DB) UpdateType(id, newType string) error {
+	now := model.NowRFC3339()
+	res, err := d.conn.Exec(
+		`UPDATE memories SET type = ?, updated_at = ? WHERE id = ?`,
+		newType, now, id,
+	)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("no memory with id %s", id)
+	}
+	return nil
+}
+
 func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model.MemoryWithScore, error) {
 	blob, err := sqlite_vec.SerializeFloat32(embedding)
 	if err != nil {
