@@ -10,6 +10,7 @@ import (
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/store"
+	"github.com/ybonda/memo/internal/vault"
 	"github.com/ybonda/memo/internal/version"
 )
 
@@ -30,7 +31,11 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		memStore, err = store.New(cfg)
+		v, err := vault.New(cfg.VaultPath)
+		if err != nil {
+			return err
+		}
+		memStore, err = store.New(cfg, v)
 		if err != nil {
 			return err
 		}

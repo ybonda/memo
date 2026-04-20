@@ -23,6 +23,7 @@ type EmbeddingConfig struct {
 
 type Config struct {
 	DBPath             string          `yaml:"db_path"`
+	VaultPath          string          `yaml:"vault_path"`
 	Embedding          EmbeddingConfig `yaml:"embedding"`
 	DuplicateThreshold float32         `yaml:"duplicate_threshold"`
 	Types              []TypeDef       `yaml:"types"`
@@ -35,7 +36,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		DBPath: filepath.Join(home, ".memo", "memories.db"),
+		DBPath:    filepath.Join(home, ".memo", "memories.db"),
+		VaultPath: filepath.Join(home, ".memo", "vault"),
 		Embedding: EmbeddingConfig{
 			Model:      "BAAI/bge-small-en-v1.5",
 			Dimensions: 384,
@@ -97,7 +99,13 @@ func Load() (*Config, error) {
 
 	// Expand ~ in paths
 	cfg.DBPath = expandPath(cfg.DBPath)
+	cfg.VaultPath = expandPath(cfg.VaultPath)
 	cfg.Embedding.CacheDir = expandPath(cfg.Embedding.CacheDir)
+
+	// Backfill VaultPath for configs written before this field existed.
+	if cfg.VaultPath == "" {
+		cfg.VaultPath = filepath.Join(home, ".memo", "vault")
+	}
 
 	// Build type registry
 	cfg.TypeRegistry = make(map[string]TypeDef, len(cfg.Types))

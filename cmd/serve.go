@@ -12,6 +12,7 @@ import (
 	"github.com/ybonda/memo/internal/config"
 	mcpserver "github.com/ybonda/memo/internal/mcp"
 	"github.com/ybonda/memo/internal/store"
+	"github.com/ybonda/memo/internal/vault"
 )
 
 var serveCmd = &cobra.Command{
@@ -48,8 +49,14 @@ var serveCmd = &cobra.Command{
 		}
 		log("config loaded in %s", time.Since(t0))
 
+		v, err := vault.New(cfg.VaultPath)
+		if err != nil {
+			log("vault init failed: %v", err)
+			return err
+		}
+
 		t1 := time.Now()
-		s, err := store.New(cfg)
+		s, err := store.New(cfg, v)
 		if err != nil {
 			log("store init failed: %v", err)
 			return err

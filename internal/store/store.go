@@ -2,21 +2,33 @@ package store
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/db"
 	"github.com/ybonda/memo/internal/embedding"
 	"github.com/ybonda/memo/internal/model"
+	"github.com/ybonda/memo/internal/vault"
 )
+
+// listAllCap is the effective upper bound used when the store needs to
+// iterate every memory (e.g. full vault export). SQLite's LIMIT requires a
+// concrete integer; this is large enough to cover any realistic memory
+// collection.
+const listAllCap = 1 << 30
 
 type MemoryStore struct {
 	db       *db.DB
 	embedder *embedding.Embedder
 	config   *config.Config
+	vault    *vault.Vault // optional; nil disables vault export
 }
 
-func New(cfg *config.Config) (*MemoryStore, error) {
+// New constructs a MemoryStore. The vault is optional — pass nil to disable
+// Obsidian export (useful in tests or tools that should not touch the
+// filesystem beyond the DB).
+func New(cfg *config.Config, v *vault.Vault) (*MemoryStore, error) {
 	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open database: %w", err)
@@ -35,7 +47,43 @@ func New(cfg *config.Config) (*MemoryStore, error) {
 		return nil, fmt.Errorf("embedder warmup failed: %w", err)
 	}
 
-	return &MemoryStore{db: database, embedder: embedder, config: cfg}, nil
+	return &MemoryStore{db: database, embedder: embedder, config: cfg, vault: v}, nil
+}
+
+// Vault returns the underlying vault handle, or nil if none is attached.
+func (s *MemoryStore) Vault() *vault.Vault { return s.vault }
+
+// ExportVault rewrites the entire vault from the current DB state. Used by
+// the `memo export` command.
+func (s *MemoryStore) ExportVault(opts vault.ExportOptions) (*vault.ExportResult, error) {
+	if s.vault == nil {
+		return nil, fmt.Errorf("vault is not configured")
+	}
+	mems, err := s.db.ListAll(listAllCap, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list memories: %w", err)
+	}
+	return s.vault.ExportAll(mems, opts)
+}
+
+// syncVault runs the single-memory post-write hook. Errors are logged but not
+// propagated — a vault failure must never fail the DB write.
+func (s *MemoryStore) syncVault(m *model.Memory) {
+	if s.vault == nil {
+		return
+	}
+	if err := s.vault.Sync(m); err != nil {
+		fmt.Fprintf(os.Stderr, "[memo] vault sync failed for %s: %v\n", m.ID, err)
+	}
+}
+
+func (s *MemoryStore) deleteVault(id string) {
+	if s.vault == nil {
+		return
+	}
+	if err := s.vault.Delete(id); err != nil {
+		fmt.Fprintf(os.Stderr, "[memo] vault delete failed for %s: %v\n", id, err)
+	}
 }
 
 func (s *MemoryStore) Close() {
@@ -99,6 +147,7 @@ func (s *MemoryStore) Store(content string, tags []string, memType string) (*mod
 		return nil, err
 	}
 
+	s.syncVault(mem)
 	return &model.StoreResult{ID: id, Status: "created"}, nil
 }
 
@@ -123,6 +172,9 @@ func (s *MemoryStore) Delete(id string) (*model.DeleteResult, error) {
 	deleted, err := s.db.Delete(id)
 	if err != nil {
 		return nil, err
+	}
+	if deleted {
+		s.deleteVault(id)
 	}
 	return &model.DeleteResult{Deleted: deleted, ID: id}, nil
 }
@@ -159,6 +211,7 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 		return nil, err
 	}
 
+	s.syncVault(mem)
 	return &model.UpdateResult{Updated: true, Memory: mem}, nil
 }
 

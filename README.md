@@ -1,10 +1,14 @@
 # memo
 
+[![Release](https://img.shields.io/github/v/release/ybonda/memo?sort=semver)](https://github.com/ybonda/memo/releases)
+[![License](https://img.shields.io/github/license/ybonda/memo)](./LICENSE)
 [![Memo - Featured on Aigregator](https://aigregator.com/badges/memo.svg)](https://aigregator.com/tools/memo?utm_source=badge&utm_medium=embed&utm_campaign=featured)
 
 Persistent memory for AI coding agents. Give Claude Code, Cursor, Codex, and other MCP-compatible tools a semantic memory that survives between sessions — all data stays on your machine.
 
 memo runs as a local MCP server, embedding and storing memories in SQLite with vector search. Your AI agent remembers architecture decisions, bug patterns, project context, and anything else you tell it to — across every conversation.
+
+Every memory is also rendered as a Markdown file in an Obsidian-compatible vault, so you can browse, search, and graph your memory store with the full Obsidian UI.
 
 ## Architecture
 
@@ -20,11 +24,12 @@ flowchart TB
         CLI["CLI<br/><i>Cobra, 7 commands</i>"]
     end
 
-    STORE(["MemoryStore<br/>Orchestration, Two-tier dedup"])
+    STORE(["MemoryStore<br/>Orchestration, Two-tier dedup, Post-write vault hook"])
 
     subgraph Infra["Infrastructure"]
         EMB["Embedder<br/><i>hugot / GoMLX</i><br/>BAAI/bge-small-en-v1.5<br/><i>text to float32 x384</i>"]
         DB["Database<br/><i>SQLite + sqlite-vec</i><br/>Cosine KNN search"]
+        VAULT["Vault Renderer<br/><i>YAML frontmatter + Markdown</i><br/>One-way projection of DB"]
         FMT["Formatter<br/><i>fatih/color, go-isatty</i><br/>TTY cards | JSON"]
     end
 
@@ -33,6 +38,7 @@ flowchart TB
         DBFILE[("memories.db")]
         MODELS[("models/<br/>bge-small-en-v1.5")]
         CONF[("config.yaml")]
+        VAULTDIR[("vault/<br/>Obsidian-compatible")]
     end
 
     AGENT -- "JSON-RPC over stdio" --> MCP
@@ -42,8 +48,10 @@ flowchart TB
     CLI --> FMT
     STORE --> EMB
     STORE --> DB
+    STORE --> VAULT
     DB -.-> DBFILE
     EMB -.-> MODELS
+    VAULT -.-> VAULTDIR
 ```
 
 **Data flow for `remember` (the most complex operation):**
@@ -137,6 +145,44 @@ You:  "Summarize what we've learned about our Go services"
 
 Memories persist across sessions. Next week, in a different project, the agent can still recall what you stored today.
 
+## Upgrading
+
+Existing installs upgrade cleanly: your `~/.memo/memories.db` and `~/.memo/config.yaml` are preserved, and new config fields (like `vault_path`) are backfilled with defaults on first run. No migrations, no data loss.
+
+### 1. Update the binary
+
+**Homebrew:**
+
+```bash
+brew update && brew upgrade memo
+```
+
+**Install script** (re-run — it downloads the latest release):
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/ybonda/memo/main/install.sh | sh
+```
+
+**From source:**
+
+```bash
+cd path/to/memo && git pull && make install
+```
+
+### 2. Mirror existing memories into the vault (v0.2.0 one-time)
+
+The auto-sync hook only fires on future writes. To mirror memories that predate the upgrade into the Obsidian vault, run a one-time full export:
+
+```bash
+memo export
+```
+
+Then open `~/.memo/vault/` in Obsidian.
+
+### 3. Restart your MCP client
+
+Claude Code, Cursor, and other MCP clients spawn `memo serve` as a long-running child process. After upgrading the binary, restart the client (or the `memo serve` process directly) so it picks up the new version.
+
 ## MCP Tools
 
 The MCP server exposes seven tools to the agent:
@@ -193,6 +239,7 @@ Auto-created at `~/.memo/config.yaml` on first run:
 
 ```yaml
 db_path: ~/.memo/memories.db
+vault_path: ~/.memo/vault
 embedding:
   model: BAAI/bge-small-en-v1.5
   dimensions: 384
@@ -239,6 +286,15 @@ memo similar --content "Go channels enable CSP-style concurrency"
 # Update or remove
 memo update --id 31940748-a1b2-c3d4-e5f6-119922334455 --tags "go,concurrency,channels,goroutines"
 memo forget --id 80035334-f6e5-d4c3-b2a1-554433221100
+
+# Rebuild the Obsidian vault from the DB (first-time setup or after pointing vault_path elsewhere)
+memo export
+
+# Preview what would change without touching the filesystem
+memo export --dry-run
+
+# Regenerate frozen slugs from current content (rare; after heavy content rewrites)
+memo export --rename
 ```
 
 Terminal output renders as colored cards with relative timestamps:
@@ -262,7 +318,57 @@ Terminal output renders as colored cards with relative timestamps:
 | `memo similar` | `--content` (required) | Returns 5 most similar memories with scores |
 | `memo update` | `--id` (required), `--content`, `--type`, `--tags` | Only provided fields change; re-embeds on content change |
 | `memo forget` | `--id` (required) | Permanent delete |
+| `memo export` | `--rename`, `--dry-run` | Full rebuild of the Obsidian vault from the DB; prunes orphans. Normal writes auto-sync without this command |
 | `memo serve` | | Starts MCP server over stdio |
+
+## Obsidian Vault
+
+Every memory is mirrored to a Markdown file under `~/.memo/vault/` (configurable via `vault_path`). Point Obsidian at that folder and you get the full Obsidian UI (graph view, full-text search, tag browsing, mobile sync) over your memory store.
+
+**Layout:**
+
+```
+~/.memo/vault/
+├── note/
+│   ├── 31940748-go-uses-goroutines-and-channels.md
+│   └── 492dd345-memory-one-about-caching.md
+├── bug/
+│   └── 038bf12e-memory-two-about-retries.md
+└── architecture/
+    └── 931cdde9-memory-three-about-metrics.md
+```
+
+Folders mirror memory types. Filenames are `<short-id>-<slug>.md` where `<short-id>` is the first 8 hex chars of the UUID and `<slug>` is a slugified snippet of the content. The filename is **frozen** at first write so Obsidian wikilinks remain stable across content edits.
+
+**File shape** (YAML frontmatter + body):
+
+```markdown
+---
+id: 29dd4bab-221a-1ba5-db14-1a420c53e2bf
+title: First memo about SQLite
+type: note
+tags:
+  - db
+  - sqlite
+created: "2026-04-19T14:59:55Z"
+updated: "2026-04-19T14:59:55Z"
+---
+
+First memo about SQLite
+```
+
+Obsidian's Properties UI recognizes `tags`, `created`, and `updated` natively. Use `title` as the display column in your file browser.
+
+**One-way semantics:** the DB is the sole source of truth. Every `remember` / `update` / `forget` (CLI or MCP) syncs the affected `.md` file automatically. Manual edits inside Obsidian are silently overwritten on the next sync. To change a memory's content, use `memo update` (or ask your agent to).
+
+**When to run `memo export` manually:**
+
+- First-time setup, if `~/.memo/vault/` was deleted or moved
+- After changing `vault_path` to a new location
+- To prune orphan `.md` files left behind by a failed hook (rare; iCloud offline, permission error)
+- With `--rename` after heavy content rewrites, to refresh stale slugs
+
+User-authored `.md` files in the vault (any filename that doesn't start with an 8-hex short-id) are left untouched by `memo export`, so you can add your own notes alongside the generated ones.
 
 ## Design
 
@@ -274,3 +380,4 @@ Terminal output renders as colored cards with relative timestamps:
 | SHA256 content-hashed IDs | Deterministic — same content always gets same ID, enabling dedup |
 | Config-driven types | Extensible without recompilation, strict validation |
 | Dual output (TTY cards / JSON) | Human-friendly in terminal, machine-parseable when piped |
+| Vault is a one-way projection of the DB | Avoids conflict resolution; content-addressed IDs stay sound; users get Obsidian's UI without a two-sync-engine complexity |
