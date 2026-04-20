@@ -8,13 +8,18 @@ import (
 )
 
 type Memory struct {
-	ID        string            `json:"id"`
-	Content   string            `json:"content"`
-	Type      string            `json:"type"`
-	Tags      []string          `json:"tags"`
-	Context   map[string]string `json:"context,omitempty"`
-	CreatedAt string            `json:"created_at"`
-	UpdatedAt string            `json:"updated_at"`
+	ID      string            `json:"id"`
+	Content string            `json:"content"`
+	Type    string            `json:"type"`
+	Tags    []string          `json:"tags"`
+	Context map[string]string `json:"context,omitempty"`
+	// RenderedBody is the optional LLM-rewritten markdown cached for vault
+	// export. Populated only when Config.LLMExport.Enabled is true and a
+	// successful claude-CLI render has run. Never fed into GenerateID or
+	// the embedding so dedup semantics stay content-only.
+	RenderedBody string `json:"rendered_body,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 type MemoryWithScore struct {

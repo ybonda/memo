@@ -116,7 +116,14 @@ func Render(m *model.Memory) ([]byte, error) {
 		return nil, fmt.Errorf("close encoder: %w", err)
 	}
 
-	body := Format(m.Content)
+	// Prefer the LLM-rendered body when it is cached on the memory; otherwise
+	// fall back to the deterministic rule-based formatter. Both paths produce
+	// Obsidian-ready markdown; the LLM path handles arbitrary section shapes
+	// that the deterministic whitelist can't anticipate.
+	body := m.RenderedBody
+	if body == "" {
+		body = Format(m.Content)
+	}
 
 	var out bytes.Buffer
 	out.WriteString("---\n")

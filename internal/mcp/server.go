@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -45,7 +46,7 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 	srv.AddTool(mcp.NewTool("memo_remember",
 		mcp.WithDescription("Store a new memory with semantic dedup detection"),
 		mcp.WithString("content", mcp.Required(), mcp.Description("The content to remember")),
-		mcp.WithString("type", mcp.Description("Memory type"), mcp.Enum(typeNames...)),
+		mcp.WithString("type", mcp.Description(typeDescription(cfg, "Memory type to assign")), mcp.Enum(typeNames...)),
 		mcp.WithArray("tags", mcp.Description("Tags for the memory"), mcp.WithStringItems()),
 		mcp.WithObject("context", mcp.Description(
 			"Optional capture-context fields as a flat key/value map. "+
@@ -81,7 +82,7 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 		mcp.WithDescription("Partially update a memory (re-embeds on content change)"),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Memory ID to update")),
 		mcp.WithString("content", mcp.Description("New content")),
-		mcp.WithString("type", mcp.Description("New memory type"), mcp.Enum(typeNames...)),
+		mcp.WithString("type", mcp.Description(typeDescription(cfg, "New memory type")), mcp.Enum(typeNames...)),
 		mcp.WithArray("tags", mcp.Description("New tags"), mcp.WithStringItems()),
 	), h.update)
 
@@ -128,6 +129,28 @@ func typeEnum(cfg *config.Config) []string {
 		names[i] = t.Name
 	}
 	return names
+}
+
+// typeDescription renders the configured types as a bulleted list so the LLM
+// can pick the right one when assigning a memory's type. Built from
+// cfg.Types[].Description, so editing ~/.memo/config.yaml and restarting
+// `memo serve` updates what the agent sees.
+func typeDescription(cfg *config.Config, prefix string) string {
+	if len(cfg.Types) == 0 {
+		return prefix
+	}
+	var b strings.Builder
+	b.WriteString(prefix)
+	b.WriteString(". Options:")
+	for _, t := range cfg.Types {
+		b.WriteString("\n- ")
+		b.WriteString(t.Name)
+		if t.Description != "" {
+			b.WriteString(": ")
+			b.WriteString(t.Description)
+		}
+	}
+	return b.String()
 }
 
 // --- Tool handlers ---

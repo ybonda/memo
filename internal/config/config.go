@@ -21,6 +21,19 @@ type EmbeddingConfig struct {
 	CacheDir   string `yaml:"cache_dir"`
 }
 
+// LLMExportConfig configures the optional `claude` CLI pass that rewrites
+// memory bodies into richer Obsidian markdown at write time. When Enabled is
+// false (the default), memo renders via the deterministic Format() pipeline.
+// When true, each memo remember / memo update shells out to Command with the
+// raw content, caches the result in memories.rendered_body, and uses it at
+// render time. Any failure falls back to the deterministic pipeline silently.
+type LLMExportConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	Command        string `yaml:"command"`
+	Model          string `yaml:"model,omitempty"`
+	TimeoutSeconds int    `yaml:"timeout_seconds"`
+}
+
 type Config struct {
 	DBPath             string          `yaml:"db_path"`
 	VaultPath          string          `yaml:"vault_path"`
@@ -32,6 +45,10 @@ type Config struct {
 	// pointer so existing configs without the key still default to on after
 	// the backfill below (a plain bool would zero to false instead).
 	AutoCaptureContext *bool `yaml:"auto_capture_context,omitempty"`
+
+	// LLMExport is the optional claude-CLI pass that rewrites memory bodies
+	// into richer Obsidian markdown. Disabled by default.
+	LLMExport LLMExportConfig `yaml:"llm_md_export"`
 
 	// Derived fields (not in YAML)
 	TypeRegistry map[string]TypeDef `yaml:"-"`
@@ -59,6 +76,16 @@ func DefaultConfig() *Config {
 		},
 		DuplicateThreshold: 0.90,
 		AutoCaptureContext: &captureOn,
+		LLMExport: LLMExportConfig{
+			Enabled: false,
+			Command: "claude",
+			// Default to Sonnet: Opus is overkill for structural markdown
+			// rewriting, Haiku can miss section-header nuance. Sonnet is the
+			// sweet spot on quality vs. latency/subscription-quota. Override
+			// via config.yaml if you want to pin to a specific model ID.
+			Model:          "sonnet",
+			TimeoutSeconds: 60,
+		},
 		Types: []TypeDef{
 			{Name: "note", Description: "General observations, ideas, WIP thoughts", Default: true},
 			{Name: "bug", Description: "Bug reports, error patterns, known issues"},
@@ -120,6 +147,16 @@ func Load() (*Config, error) {
 	// Backfill VaultPath for configs written before this field existed.
 	if cfg.VaultPath == "" {
 		cfg.VaultPath = filepath.Join(home, ".memo", "vault")
+	}
+
+	// Backfill LLMExport defaults for configs predating this feature or with
+	// the field present but partial. Command defaults to `claude` so when a
+	// user flips Enabled=true, the rest just works.
+	if cfg.LLMExport.Command == "" {
+		cfg.LLMExport.Command = "claude"
+	}
+	if cfg.LLMExport.TimeoutSeconds <= 0 {
+		cfg.LLMExport.TimeoutSeconds = 60
 	}
 
 	// Build type registry

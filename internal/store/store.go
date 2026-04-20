@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/db"
 	"github.com/ybonda/memo/internal/embedding"
+	"github.com/ybonda/memo/internal/llm"
 	"github.com/ybonda/memo/internal/model"
 	"github.com/ybonda/memo/internal/vault"
 )
@@ -53,11 +55,14 @@ type MemoryStore struct {
 	embedder *embedding.Embedder
 	config   *config.Config
 	vault    *vault.Vault // optional; nil disables vault export
+	renderer llm.Renderer // optional; nil when LLMExport.Enabled is false
 }
 
 // New constructs a MemoryStore. The vault is optional — pass nil to disable
 // Obsidian export (useful in tests or tools that should not touch the
-// filesystem beyond the DB).
+// filesystem beyond the DB). The LLM renderer is configured automatically
+// from cfg.LLMExport; when disabled, the deterministic vault formatter runs
+// unchanged.
 func New(cfg *config.Config, v *vault.Vault) (*MemoryStore, error) {
 	database, err := db.Open(cfg.DBPath, cfg.Embedding.Dimensions)
 	if err != nil {
@@ -77,7 +82,35 @@ func New(cfg *config.Config, v *vault.Vault) (*MemoryStore, error) {
 		return nil, fmt.Errorf("embedder warmup failed: %w", err)
 	}
 
-	return &MemoryStore{db: database, embedder: embedder, config: cfg, vault: v}, nil
+	var renderer llm.Renderer
+	if r := llm.NewFromConfig(cfg.LLMExport); r != nil {
+		renderer = r
+	}
+
+	return &MemoryStore{
+		db:       database,
+		embedder: embedder,
+		config:   cfg,
+		vault:    v,
+		renderer: renderer,
+	}, nil
+}
+
+// renderedBodyOrEmpty invokes the LLM renderer if one is configured and
+// returns its output, or "" on any failure (logged to stderr). Errors never
+// propagate: the store's contract is that a vault-side renderer outage must
+// not fail the DB write. Callers should fall through to Format() downstream
+// when the return is empty.
+func (s *MemoryStore) renderedBodyOrEmpty(content string) string {
+	if s.renderer == nil {
+		return ""
+	}
+	rendered, err := s.renderer.Render(context.Background(), content)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[memo] llm render failed, falling back to deterministic: %v\n", err)
+		return ""
+	}
+	return rendered
 }
 
 // Vault returns the underlying vault handle, or nil if none is attached.
@@ -170,13 +203,14 @@ func (s *MemoryStore) Store(content string, tags []string, memType string, ctx m
 
 	now := model.NowRFC3339()
 	mem := &model.Memory{
-		ID:        id,
-		Content:   content,
-		Type:      memType,
-		Tags:      tags,
-		Context:   ctx,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:           id,
+		Content:      content,
+		Type:         memType,
+		Tags:         tags,
+		Context:      ctx,
+		RenderedBody: s.renderedBodyOrEmpty(content),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	if err := s.db.Insert(mem, emb); err != nil {
@@ -224,8 +258,10 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 		return &model.UpdateResult{Updated: false}, nil
 	}
 
-	if content != nil {
+	contentChanged := false
+	if content != nil && *content != mem.Content {
 		mem.Content = *content
+		contentChanged = true
 	}
 	if tags != nil {
 		mem.Tags = *tags
@@ -237,6 +273,13 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 		mem.Type = *memType
 	}
 	mem.UpdatedAt = model.NowRFC3339()
+
+	// Re-render only when content actually changed; otherwise the cached
+	// rendered body is still accurate and re-invoking the LLM just burns
+	// subscription quota without user-visible benefit.
+	if contentChanged {
+		mem.RenderedBody = s.renderedBodyOrEmpty(mem.Content)
+	}
 
 	emb, err := s.embedder.Embed(mem.Content)
 	if err != nil {
@@ -379,6 +422,53 @@ func (s *MemoryStore) ReconcileVault(opts ReconcileOptions) (*ReconcileResult, e
 	}
 	res.Applied = true
 	return res, nil
+}
+
+// ReformatOneResult reports the outcome of a single-memory LLM refresh.
+type ReformatOneResult struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Rendered bool   `json:"rendered"`
+	Skipped  bool   `json:"skipped,omitempty"`
+}
+
+// ReformatOne re-runs the LLM render pipeline for exactly one memory and
+// writes the result back to the DB + vault. Single-memory scope is
+// intentional: bulk reformat is a blast-radius hazard because a single
+// invocation can burn large amounts of subscription quota and cascade a bad
+// prompt change across the entire knowledge base. Callers wanting to refresh
+// several memories must invoke this repeatedly with explicit IDs.
+//
+// Errors from the LLM propagate to the caller (no silent fallback): the user
+// explicitly asked for this render, so if claude failed they need to see why
+// rather than get a misleadingly "successful" unchanged file.
+func (s *MemoryStore) ReformatOne(id string) (*ReformatOneResult, error) {
+	if s.renderer == nil {
+		return nil, fmt.Errorf("llm_md_export is not enabled; set enabled: true in config.yaml")
+	}
+	m, err := s.db.Get(id)
+	if err != nil {
+		return nil, fmt.Errorf("get memory: %w", err)
+	}
+	if m == nil {
+		return nil, fmt.Errorf("no memory with id %s", id)
+	}
+
+	rendered, err := s.renderer.Render(context.Background(), m.Content)
+	if err != nil {
+		return nil, fmt.Errorf("llm render: %w", err)
+	}
+
+	title := vault.Title(m.Content)
+	if rendered == m.RenderedBody {
+		return &ReformatOneResult{ID: m.ID, Title: title, Skipped: true}, nil
+	}
+	if err := s.db.UpdateRenderedBody(m.ID, rendered); err != nil {
+		return nil, fmt.Errorf("db update: %w", err)
+	}
+	m.RenderedBody = rendered
+	s.syncVault(m)
+	return &ReformatOneResult{ID: m.ID, Title: title, Rendered: true}, nil
 }
 
 func (s *MemoryStore) FindSimilar(content string) ([]model.MemoryWithScore, error) {
