@@ -20,10 +20,24 @@ import (
 	"github.com/ybonda/memo/internal/config"
 )
 
+// MaxRenderBytes caps the input size the LLM renderer will accept. Above this
+// threshold the `claude -p` subprocess routinely exceeds the 60s default
+// timeout (Sonnet at typical output throughput needs ~70-120s for 16-20 KB
+// input with preserve-all-content instructions). Rather than burn the full
+// timeout and produce no output, we fail fast so the caller keeps the
+// deterministic vault body instead. Haiku can handle larger inputs within
+// the same window; users running Haiku with bigger memos can bump this
+// value in their fork if needed.
+const MaxRenderBytes = 20 * 1024
+
 // Renderer rewrites raw memory content into polished Obsidian markdown.
 // Implementations may shell out (ClaudeCLI) or use a fake (tests).
 type Renderer interface {
 	Render(ctx context.Context, raw string) (string, error)
+	// Model returns the model identifier this renderer targets (e.g.
+	// "haiku", "sonnet"). Used for audit-trail frontmatter so a memo's
+	// vault file records which model last rendered its body.
+	Model() string
 }
 
 // ClaudeCLI invokes `claude -p` (print mode) as a subprocess with the raw
@@ -52,6 +66,9 @@ func NewFromConfig(cfg config.LLMExportConfig) *ClaudeCLI {
 	}
 }
 
+// Model returns the configured model name, or "" if unset.
+func (c *ClaudeCLI) Model() string { return c.model }
+
 // Render shells out to `claude -p` with the hardcoded prompt and raw content.
 // Returns the post-processed rendered markdown or an error describing why the
 // pipeline failed. The caller is responsible for choosing a fallback (memo's
@@ -59,6 +76,9 @@ func NewFromConfig(cfg config.LLMExportConfig) *ClaudeCLI {
 func (c *ClaudeCLI) Render(ctx context.Context, raw string) (string, error) {
 	if raw == "" {
 		return "", errors.New("empty content")
+	}
+	if len(raw) > MaxRenderBytes {
+		return "", fmt.Errorf("content too large for LLM render: %d bytes exceeds %d limit", len(raw), MaxRenderBytes)
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()

@@ -69,9 +69,14 @@ func Render(m *model.Memory) ([]byte, error) {
 		addScalar("title", title)
 	}
 	addScalar("type", m.Type)
-	tags := m.Tags
-	if tags == nil {
-		tags = []string{}
+	// Sanitize tags for Obsidian's tag syntax (no spaces, limited punctuation).
+	// DB keeps the original form; vault gets a display-valid form so the
+	// Properties UI doesn't strikethrough otherwise-meaningful tags.
+	tags := make([]string, 0, len(m.Tags))
+	for _, t := range m.Tags {
+		if clean := SanitizeTagForObsidian(t); clean != "" {
+			tags = append(tags, clean)
+		}
 	}
 	if err := addEncoded("tags", tags); err != nil {
 		return nil, fmt.Errorf("encode tags: %w", err)
@@ -105,6 +110,13 @@ func Render(m *model.Memory) ([]byte, error) {
 
 	addScalar("created", m.CreatedAt)
 	addScalar("updated", m.UpdatedAt)
+	// rendered_by is only written when the LLM pipeline produced the body.
+	// Absent = vault showing the deterministic formatter output. Lets users
+	// tell at a glance whether a .md file reflects a polished render, and
+	// which model produced it (useful after switching haiku ↔ sonnet).
+	if m.RenderedBy != "" {
+		addScalar("rendered_by", m.RenderedBy)
+	}
 
 	var yamlBuf bytes.Buffer
 	enc := yaml.NewEncoder(&yamlBuf)

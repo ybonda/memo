@@ -87,3 +87,66 @@ func firstNonEmptyLine(s string) string {
 	}
 	return ""
 }
+
+// SanitizeTagForObsidian rewrites a tag into Obsidian-valid form. Obsidian
+// accepts only letters (Unicode-aware), digits, hyphen, underscore, and
+// forward slash (for nested tags). Anything else — notably spaces — triggers
+// a strikethrough "invalid tag" indicator in the Properties UI. We replace
+// each run of disallowed characters with a single hyphen and strip leading
+// or trailing hyphens. Case is preserved because Obsidian matches tags
+// case-insensitively and users may care about display form.
+//
+// Returns the input unchanged when it already contains only valid characters,
+// so common tags ("pendo-io", "jobs-silofiles", "Digiday_Media") pass through
+// untouched and diffs stay stable.
+func SanitizeTagForObsidian(tag string) string {
+	if tagIsObsidianValid(tag) {
+		return tag
+	}
+	var b strings.Builder
+	b.Grow(len(tag))
+	prevHyphen := false
+	for _, r := range tag {
+		if isObsidianTagRune(r) {
+			b.WriteRune(r)
+			prevHyphen = false
+			continue
+		}
+		if !prevHyphen {
+			b.WriteByte('-')
+			prevHyphen = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func tagIsObsidianValid(tag string) bool {
+	if tag == "" {
+		return true
+	}
+	for _, r := range tag {
+		if !isObsidianTagRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isObsidianTagRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z':
+		return true
+	case r >= 'A' && r <= 'Z':
+		return true
+	case r >= '0' && r <= '9':
+		return true
+	case r == '-' || r == '_' || r == '/':
+		return true
+	case r > 127:
+		// Unicode letters/digits are valid in Obsidian tags. Accept all
+		// non-ASCII runes here; the rare punctuation in non-ASCII scripts
+		// is a lower-priority edge case than CJK/Cyrillic/etc user tags.
+		return true
+	}
+	return false
+}

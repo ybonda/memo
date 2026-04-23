@@ -108,6 +108,12 @@ func Serve(s *store.MemoryStore, cfg *config.Config, stdout io.Writer) error {
 		mcp.WithBoolean("apply", mcp.Description("If true, commit the diff; otherwise preview only")),
 	), h.reconcile)
 
+	// memo_status
+	srv.AddTool(mcp.NewTool("memo_status",
+		mcp.WithDescription("Show memo inventory (counts per type, oldest/newest), configured paths, vault drift (orphans, type mismatches), embedding + LLM render config, and the most recent async LLM render error (if any)."),
+		mcp.WithReadOnlyHintAnnotation(true),
+	), h.status)
+
 	stdioSrv := server.NewStdioServer(srv)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -318,4 +324,13 @@ func (h *Handler) similar(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	return mcp.NewToolResultJSON(map[string]any{"memories": results})
+}
+
+func (h *Handler) status(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	info, err := h.store.Status()
+	if err != nil {
+		logErr("memo_status", err)
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultJSON(info)
 }

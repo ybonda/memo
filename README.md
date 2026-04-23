@@ -189,7 +189,7 @@ Claude Code, Cursor, and other MCP clients spawn `memo serve` as a long-running 
 
 ## MCP Tools
 
-The MCP server exposes eight tools to the agent:
+The MCP server exposes nine tools to the agent:
 
 | Tool | What it does |
 |------|-------------|
@@ -201,8 +201,27 @@ The MCP server exposes eight tools to the agent:
 | `memo_update` | Update content, type, or tags |
 | `memo_forget` | Delete a memory by full UUID or 8-hex short-id (Obsidian filename prefix) |
 | `memo_reconcile` | Reflect Obsidian deletes and type-folder moves back into the DB |
+| `memo_status` | Show counts per type, paths, vault drift, and the most recent async render error |
 
 The server keeps the embedding model and database connection warm for the entire session — tool calls complete in milliseconds.
+
+## Using memo with Claude Code without flooding your terminal
+
+By default, every `mcp__memo__*` tool call inlines its raw JSON result into the chat. For list/recall calls that return dozens of memories this is loud and burns main-thread context. Wrap all memo MCP calls inside a subagent so the raw JSON stays inside the subagent's context and only a short summary reaches the main thread.
+
+Add the following rule to your `~/.claude/CLAUDE.md` (global) or a project-level `CLAUDE.md`:
+
+```
+Memo tools: ALWAYS wrap ALL `mcp__memo__*` tool calls (search, recall, remember,
+update, forget, list, similar, reconcile, status) inside an `Agent` subagent
+(subagent_type: `general-purpose`). Never call these tools directly from the
+main thread. The subagent must return a concise summary (<300 words): for reads,
+key points + memory IDs; for writes (remember/update/forget/reconcile), just
+confirm success + memory ID. Never surface raw JSON to the main thread.
+Exception: if I explicitly ask to see raw memo JSON, call directly.
+```
+
+The `mcp__memo__*` glob covers every current and future memo MCP tool, so you never need to revisit this rule when new ones are added. Read operations (`search`, `recall`, `list`, `similar`, `status`) benefit most — they return the largest payloads. Write operations (`remember`, `update`, `forget`) also get wrapped for consistency; the overhead is negligible since the response is small anyway.
 
 ## Custom Memory Types
 
@@ -213,11 +232,10 @@ Memory types are fully configurable — define whatever categories make sense fo
 | Type | Description |
 |---|---|
 | `note` | General observations, ideas, WIP thoughts (default) |
-| `bug` | Bug reports, error patterns, known issues |
-| `incident` | Production incidents, outages, escalations |
+| `incident` | Production incidents, PagerDuty alerts, outages, escalations, bugs, issues |
+| `ticket` | Jira tickets, DEVOPS-*, APP-*, OPS-* |
+| `guides` | Guides, documentation, how-tos, best practices, Settings, configurations, gotchas |
 | `architecture` | Architecture decisions, system design patterns |
-| `ticket` | Tickets, tasks, action items, follow-ups |
-| `postmortem` | Post-incident analysis, root causes, remediation steps |
 
 **Adding or renaming types:**
 
@@ -228,8 +246,8 @@ types:
   - name: note
     description: "General observations, ideas, WIP thoughts"
     default: true
-  - name: bug
-    description: "Bug reports, error patterns, known issues"
+  - name: incident
+    description: "Production incidents, PagerDuty alerts, outages, escalations, bugs, issues"
   - name: my-custom-type
     description: "Whatever fits your workflow"
 ```
@@ -251,21 +269,27 @@ embedding:
   cache_dir: ~/.memo/models
 duplicate_threshold: 0.90
 
+llm_md_export:
+  enabled: false         # opt-in; disabled by default
+  command: claude        # binary to invoke (must be on PATH)
+  model: haiku           # passed as --model to `claude -p` (haiku is default — fast enough to finish within timeout; sonnet often exceeds it on large memos)
+  timeout_seconds: 180   # per-render timeout (covers CLI cold start + generation on medium memos with diagram conversion)
+
 types:
   - name: note
     description: "General observations, ideas, WIP thoughts"
     default: true
-  - name: bug
-    description: "Bug reports, error patterns, known issues"
   - name: incident
-    description: "Production incidents, outages, escalations"
+    description: "Production incidents, PagerDuty alerts, outages, escalations, bugs, issues"
+  - name: ticket
+    description: "Jira tickets, DEVOPS-*, APP-*, OPS-*"
+  - name: guides
+    description: "Guides, documentation, how-tos, best practices, Settings, configurations, gotchas"
   - name: architecture
     description: "Architecture decisions, system design patterns"
-  - name: ticket
-    description: "Tickets, tasks, action items, follow-ups"
-  - name: postmortem
-    description: "Post-incident analysis, root causes, remediation steps"
 ```
+
+See the [LLM-polished vault](#llm-polished-vault-optional) section for what `llm_md_export` does.
 
 ## CLI
 
@@ -309,6 +333,9 @@ memo reconcile
 
 # Apply them to the DB
 memo reconcile --apply
+
+# Snapshot of inventory, paths, vault drift, and the last async render error
+memo status
 ```
 
 Terminal output renders as colored cards with relative timestamps:
@@ -334,6 +361,7 @@ Terminal output renders as colored cards with relative timestamps:
 | `memo forget` | `--id` (required) | Permanent delete. `--id` accepts full UUID or 8-hex short-id prefix |
 | `memo export` | `--rename`, `--dry-run` | Full rebuild of the Obsidian vault from the DB; prunes orphans. Normal writes auto-sync without this command |
 | `memo reconcile` | `--apply` | Applies Obsidian-side deletes and type-folder moves to the DB. Dry-run by default |
+| `memo status` | | Snapshot of inventory (counts per type), paths, file sizes, vault drift, embedding + LLM render config, and the most recent async render error |
 | `memo serve` | | Starts MCP server over stdio |
 
 ## Obsidian Vault
@@ -380,6 +408,36 @@ Two structural changes you can make inside Obsidian are applied back to the DB w
 
 **Body formatting:** when `memo` writes a file, it runs the content through a small deterministic formatter that bolds ALL-CAPS lead-in labels (`KEY LESSON:`, `ROOT CAUSE:`), promotes inline `(1)(2)(3)` enumerations into real numbered lists, splits long paragraphs at sentence boundaries, and wraps hyphenated identifiers like `jobs-guideevents` in backticks. The raw content stored in the DB is untouched, so embeddings and IDs are unaffected. If you already write markdown (blank lines, lists, bold, or fenced code), the formatter leaves your text exactly as-is.
 
+### LLM-polished vault (optional)
+
+If you have the `claude` CLI installed and want richer Obsidian markdown (Obsidian `> [!info]` / `> [!warning]` callouts, wikilinked ticket IDs on first occurrence, promoted headings), enable the LLM polish in `~/.memo/config.yaml`:
+
+```yaml
+llm_md_export:
+  enabled: true
+  command: claude
+  model: haiku
+  timeout_seconds: 60
+```
+
+The feature uses your Claude Code subscription (no API key, no per-token billing — `claude -p` is invoked as a subprocess). A strict system prompt tells the model to restructure only, never paraphrase or drop content, so the polished body stays a faithful projection of what you stored.
+
+**Model choice:** Haiku is the default because the task is purely structural (restructure markdown, never add/paraphrase content) and the async flow rewards fast models. Haiku 4.5 finishes a ~16 KB memo in ~15-25s. Sonnet takes 60-120s for the same input and routinely exceeds the 60s timeout — the render gets discarded and the deterministic body stays in the vault. Switch to `sonnet` only if you find Haiku's callout/heading placement noticeably off.
+
+**How it runs:** the LLM pass is **asynchronous**. Every `memo_remember` / `memo_update` / `memo remember` / `memo update`:
+
+1. Writes the memory to the DB and syncs the `.md` file with the deterministic formatter — this completes in milliseconds and returns immediately.
+2. Schedules the LLM render in a background goroutine that overwrites the `.md` with the polished version when it finishes (~60-120s for a long memo).
+
+So the vault is always usable — Obsidian sees the deterministic version first, the polished version replaces it moments later. Claude Code (MCP) never waits on the render.
+
+**Trade-offs to know:**
+
+- Short-lived CLI processes (`memo remember "foo"`) wait for the render at `Close()` because the goroutine would otherwise be killed when the command exits. If you want fire-and-forget writes from the CLI, prefer the MCP server.
+- If you disable `llm_md_export` after using it, existing `.md` files keep their polished body until the next `memo update` or `memo export --rename`. The DB still stores the deterministic content as the source of truth.
+- `memo reformat <id>` (available when `llm_md_export.enabled: true`) re-runs the LLM render on a single memory synchronously. Useful when you want to re-polish one memory without waiting for the async path.
+- Render failures (timeout, claude CLI offline) are silent: the deterministic body stays in the vault, stderr logs `[memo] async llm render failed for <id>: ...`, and the DB is untouched.
+
 **When to run `memo export` manually:**
 
 - First-time setup, if `~/.memo/vault/` was deleted or moved
@@ -409,3 +467,4 @@ User-authored `.md` files in the vault (any filename that doesn't start with an 
 | Config-driven types | Extensible without recompilation, strict validation |
 | Dual output (TTY cards / JSON) | Human-friendly in terminal, machine-parseable when piped |
 | Vault is a one-way projection of the DB | Avoids conflict resolution; content-addressed IDs stay sound; users get Obsidian's UI without a two-sync-engine complexity |
+| LLM polish runs asynchronously | `memo_remember` / `memo_update` return in milliseconds; the optional `claude -p` pass runs in a background goroutine and upgrades the vault `.md` when ready — keeping Claude Code unblocked on long-form writes like incident memos |

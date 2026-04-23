@@ -66,6 +66,32 @@ func TestTitle(t *testing.T) {
 	}
 }
 
+func TestSanitizeTagForObsidian(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"already valid kebab", "jobs-silofiles", "jobs-silofiles"},
+		{"already valid with underscores", "Digiday_Media", "Digiday_Media"},
+		{"nested tag", "project/memo/core", "project/memo/core"},
+		{"spaces to hyphens", "Oldest Raw Event Bundle", "Oldest-Raw-Event-Bundle"},
+		{"punctuation collapsed", "severity: sev1!", "severity-sev1"},
+		{"multiple spaces collapse", "foo   bar", "foo-bar"},
+		{"leading/trailing stripped", "  --tag--  ", "tag"},
+		{"empty stays empty", "", ""},
+		{"unicode preserved", "日本語", "日本語"},
+		{"mixed unicode and punct", "日本語: メモ", "日本語-メモ"},
+		{"numeric-only", "12345", "12345"},
+		{"only punctuation becomes empty", "!!!", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SanitizeTagForObsidian(c.in); got != c.want {
+				t.Errorf("SanitizeTagForObsidian(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestRenderFrontmatter(t *testing.T) {
 	m := &model.Memory{
 		ID:        "a1b2c3d4-e5f6-1111-2222-333333333333",
@@ -96,6 +122,33 @@ func TestRenderFrontmatter(t *testing.T) {
 		if !strings.Contains(s, w) {
 			t.Errorf("Render output missing %q.\nGot:\n%s", w, s)
 		}
+	}
+	if strings.Contains(s, "rendered_by") {
+		t.Errorf("rendered_by should be absent when RenderedBy is empty")
+	}
+}
+
+func TestRenderFrontmatterWithRenderedBy(t *testing.T) {
+	m := &model.Memory{
+		ID:           "a1b2c3d4-e5f6-1111-2222-333333333333",
+		Content:      "Hello world",
+		Type:         "note",
+		Tags:         []string{},
+		RenderedBody: "# Hello world\n\npolished body",
+		RenderedBy:   "haiku",
+		CreatedAt:    "2026-04-19T10:00:00Z",
+		UpdatedAt:    "2026-04-19T10:05:00Z",
+	}
+	out, err := Render(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "rendered_by: haiku\n") {
+		t.Errorf("expected rendered_by: haiku in output; got:\n%s", s)
+	}
+	if !strings.Contains(s, "polished body") {
+		t.Errorf("expected LLM body to be emitted")
 	}
 }
 
