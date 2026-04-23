@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/db"
@@ -61,6 +63,13 @@ type MemoryStore struct {
 	// renderWG tracks in-flight async LLM renders. Close() drains it so
 	// pending work gets a chance to persist before shutdown.
 	renderWG sync.WaitGroup
+
+	// lastRenderErr remembers the most recent async LLM render failure so
+	// `memo status` and `memo_status` can surface it. Single-slot by design:
+	// status is a "did anything break" signal, not a full log. nil when no
+	// failures have occurred in this process.
+	lastRenderErrMu sync.Mutex
+	lastRenderErr   *StatusRenderError
 }
 
 // New constructs a MemoryStore. The vault is optional — pass nil to disable
@@ -119,6 +128,7 @@ func (s *MemoryStore) scheduleRender(id, content, updatedAt string) {
 		rendered, err := s.renderer.Render(context.Background(), content)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[memo] async llm render failed for %s: %v\n", id, err)
+			s.recordRenderError(id, err)
 			return
 		}
 		cur, err := s.db.Get(id)
@@ -131,12 +141,44 @@ func (s *MemoryStore) scheduleRender(id, content, updatedAt string) {
 		by := s.renderer.Model()
 		if err := s.db.UpdateRenderedBody(id, rendered, by); err != nil {
 			fmt.Fprintf(os.Stderr, "[memo] async llm db update failed for %s: %v\n", id, err)
+			s.recordRenderError(id, err)
 			return
 		}
 		cur.RenderedBody = rendered
 		cur.RenderedBy = by
 		s.syncVault(cur)
 	})
+}
+
+// recordRenderError stashes a copy of a render-time failure on the store for
+// later retrieval by Status(). The memory type is looked up opportunistically
+// so the eventual status card can show which memory failed in context.
+func (s *MemoryStore) recordRenderError(id string, renderErr error) {
+	var memType string
+	if m, _ := s.db.Get(id); m != nil {
+		memType = m.Type
+	}
+	s.lastRenderErrMu.Lock()
+	s.lastRenderErr = &StatusRenderError{
+		When:       time.Now().UTC(),
+		MemoryID:   id,
+		MemoryType: memType,
+		Error:      renderErr.Error(),
+	}
+	s.lastRenderErrMu.Unlock()
+}
+
+// LastRenderError returns a copy of the most recent async render failure, or
+// nil if none has occurred. A copy is returned so callers cannot hold a
+// reference to the mutex-guarded slot.
+func (s *MemoryStore) LastRenderError() *StatusRenderError {
+	s.lastRenderErrMu.Lock()
+	defer s.lastRenderErrMu.Unlock()
+	if s.lastRenderErr == nil {
+		return nil
+	}
+	cp := *s.lastRenderErr
+	return &cp
 }
 
 // FlushRenders blocks until all in-flight async renders complete. Close()
@@ -531,6 +573,187 @@ func (s *MemoryStore) FindSimilar(content string) ([]model.MemoryWithScore, erro
 		return nil, err
 	}
 	return s.db.KNNSearch(emb, 5, nil)
+}
+
+// StatusInfo is the aggregated health and inventory report produced by the
+// `memo status` command and the `memo_status` MCP tool. Fields are split into
+// three categories so consumers can pick what they need:
+//   - configuration: Paths, Embedding, LLMRender, Types
+//   - inventory:     Memory
+//   - health:        Files, Vault, LastRenderError
+type StatusInfo struct {
+	Paths     StatusPaths     `json:"paths"`
+	Memory    StatusMemory    `json:"memory"`
+	Files     StatusFiles     `json:"files"`
+	Vault     StatusVault     `json:"vault"`
+	Embedding StatusEmbedding `json:"embedding"`
+	LLMRender StatusLLMRender `json:"llm_render"`
+	Types     []StatusType    `json:"types"`
+
+	// LastRenderError is populated when at least one async LLM render has
+	// failed since this process started. Single-slot: only the most recent
+	// failure is kept. Omitted from JSON when nil.
+	LastRenderError *StatusRenderError `json:"last_render_error,omitempty"`
+}
+
+type StatusPaths struct {
+	Config string `json:"config"`
+	DB     string `json:"db"`
+	Vault  string `json:"vault"`
+	Models string `json:"models"`
+}
+
+type StatusMemory struct {
+	Total         int            `json:"total"`
+	ByType        map[string]int `json:"by_type"`
+	OldestCreated string         `json:"oldest_created,omitempty"` // RFC3339
+	NewestUpdated string         `json:"newest_updated,omitempty"` // RFC3339
+}
+
+type StatusFiles struct {
+	DBBytes  int64 `json:"db_bytes"`
+	WALBytes int64 `json:"wal_bytes"`
+	SHMBytes int64 `json:"shm_bytes"`
+	WALMode  bool  `json:"wal_mode"`
+}
+
+type StatusVault struct {
+	Managed        int `json:"managed"`
+	Orphans        int `json:"orphans"`
+	TypeMismatches int `json:"type_mismatches"`
+}
+
+type StatusEmbedding struct {
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	CacheDir   string `json:"cache_dir"`
+}
+
+type StatusLLMRender struct {
+	Enabled        bool   `json:"enabled"`
+	Command        string `json:"command,omitempty"`
+	Model          string `json:"model,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+type StatusType struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Default     bool   `json:"default,omitempty"`
+}
+
+type StatusRenderError struct {
+	When       time.Time `json:"when"`
+	MemoryID   string    `json:"memory_id"`
+	MemoryType string    `json:"memory_type,omitempty"`
+	Error      string    `json:"error"`
+}
+
+// Status builds a snapshot of inventory, configuration, and health. Read-only:
+// it runs a few small SELECTs plus a vault dry-run reconcile. Safe to call at
+// any time; never mutates state.
+func (s *MemoryStore) Status() (*StatusInfo, error) {
+	info := &StatusInfo{
+		Paths:     s.statusPaths(),
+		Embedding: statusEmbedding(s.config),
+		LLMRender: statusLLMRender(s.config),
+		Types:     statusTypes(s.config),
+		Files:     statusFiles(s.config.DBPath),
+	}
+
+	total, err := s.db.CountAll()
+	if err != nil {
+		return nil, fmt.Errorf("count memories: %w", err)
+	}
+	byType, err := s.db.CountByType()
+	if err != nil {
+		return nil, fmt.Errorf("count by type: %w", err)
+	}
+	oldest, newest, err := s.db.CreatedRange()
+	if err != nil {
+		return nil, fmt.Errorf("date range: %w", err)
+	}
+	info.Memory = StatusMemory{
+		Total:         total,
+		ByType:        byType,
+		OldestCreated: oldest,
+		NewestUpdated: newest,
+	}
+
+	// Vault drift: best-effort. A vault outage (iCloud offline, disk error)
+	// must not make `memo status` fail - the inventory signal is still
+	// useful on its own. The zero-value StatusVault on failure signals
+	// "unable to compute" without a separate error field.
+	if s.vault != nil {
+		if files, err := s.vault.WalkManaged(); err == nil {
+			info.Vault.Managed = len(files)
+		}
+		if rec, err := s.ReconcileVault(ReconcileOptions{Apply: false}); err == nil {
+			info.Vault.Orphans = len(rec.Unknown)
+			info.Vault.TypeMismatches = len(rec.TypeChanges)
+		}
+	}
+
+	info.LastRenderError = s.LastRenderError()
+	return info, nil
+}
+
+func (s *MemoryStore) statusPaths() StatusPaths {
+	home, _ := os.UserHomeDir()
+	return StatusPaths{
+		Config: filepath.Join(home, ".memo", "config.yaml"),
+		DB:     s.config.DBPath,
+		Vault:  s.config.VaultPath,
+		Models: s.config.Embedding.CacheDir,
+	}
+}
+
+// statusFiles stats the SQLite main DB plus its WAL and SHM sidecar files.
+// Missing sidecars are normal between transactions and report zero bytes
+// rather than an error. WALMode is hardcoded true because db.Open configures
+// it unconditionally at initialization.
+func statusFiles(dbPath string) StatusFiles {
+	out := StatusFiles{WALMode: true}
+	if st, err := os.Stat(dbPath); err == nil {
+		out.DBBytes = st.Size()
+	}
+	if st, err := os.Stat(dbPath + "-wal"); err == nil {
+		out.WALBytes = st.Size()
+	}
+	if st, err := os.Stat(dbPath + "-shm"); err == nil {
+		out.SHMBytes = st.Size()
+	}
+	return out
+}
+
+func statusEmbedding(cfg *config.Config) StatusEmbedding {
+	return StatusEmbedding{
+		Model:      cfg.Embedding.Model,
+		Dimensions: cfg.Embedding.Dimensions,
+		CacheDir:   cfg.Embedding.CacheDir,
+	}
+}
+
+func statusLLMRender(cfg *config.Config) StatusLLMRender {
+	out := StatusLLMRender{Enabled: cfg.LLMExport.Enabled}
+	if out.Enabled {
+		out.Command = cfg.LLMExport.Command
+		out.Model = cfg.LLMExport.Model
+		out.TimeoutSeconds = cfg.LLMExport.TimeoutSeconds
+	}
+	return out
+}
+
+func statusTypes(cfg *config.Config) []StatusType {
+	out := make([]StatusType, len(cfg.Types))
+	for i, t := range cfg.Types {
+		out[i] = StatusType{
+			Name:        t.Name,
+			Description: t.Description,
+			Default:     t.Default,
+		}
+	}
+	return out
 }
 
 func (s *MemoryStore) Recall(query string, limit int) (*model.RecallResult, error) {

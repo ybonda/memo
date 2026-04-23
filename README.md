@@ -187,7 +187,7 @@ Claude Code, Cursor, and other MCP clients spawn `memo serve` as a long-running 
 
 ## MCP Tools
 
-The MCP server exposes eight tools to the agent:
+The MCP server exposes nine tools to the agent:
 
 | Tool | What it does |
 |------|-------------|
@@ -199,8 +199,27 @@ The MCP server exposes eight tools to the agent:
 | `memo_update` | Update content, type, or tags |
 | `memo_forget` | Delete a memory by full UUID or 8-hex short-id (Obsidian filename prefix) |
 | `memo_reconcile` | Reflect Obsidian deletes and type-folder moves back into the DB |
+| `memo_status` | Show counts per type, paths, vault drift, and the most recent async render error |
 
 The server keeps the embedding model and database connection warm for the entire session — tool calls complete in milliseconds.
+
+## Using memo with Claude Code without flooding your terminal
+
+By default, every `mcp__memo__*` tool call inlines its raw JSON result into the chat. For list/recall calls that return dozens of memories this is loud and burns main-thread context. Wrap all memo MCP calls inside a subagent so the raw JSON stays inside the subagent's context and only a short summary reaches the main thread.
+
+Add the following rule to your `~/.claude/CLAUDE.md` (global) or a project-level `CLAUDE.md`:
+
+```
+Memo tools: ALWAYS wrap ALL `mcp__memo__*` tool calls (search, recall, remember,
+update, forget, list, similar, reconcile, status) inside an `Agent` subagent
+(subagent_type: `general-purpose`). Never call these tools directly from the
+main thread. The subagent must return a concise summary (<300 words): for reads,
+key points + memory IDs; for writes (remember/update/forget/reconcile), just
+confirm success + memory ID. Never surface raw JSON to the main thread.
+Exception: if I explicitly ask to see raw memo JSON, call directly.
+```
+
+The `mcp__memo__*` glob covers every current and future memo MCP tool, so you never need to revisit this rule when new ones are added. Read operations (`search`, `recall`, `list`, `similar`, `status`) benefit most — they return the largest payloads. Write operations (`remember`, `update`, `forget`) also get wrapped for consistency; the overhead is negligible since the response is small anyway.
 
 ## Custom Memory Types
 
@@ -211,11 +230,10 @@ Memory types are fully configurable — define whatever categories make sense fo
 | Type | Description |
 |---|---|
 | `note` | General observations, ideas, WIP thoughts (default) |
-| `bug` | Bug reports, error patterns, known issues |
-| `incident` | Production incidents, outages, escalations |
+| `incident` | Production incidents, PagerDuty alerts, outages, escalations, bugs, issues |
+| `ticket` | Jira tickets, DEVOPS-*, APP-*, OPS-* |
+| `guides` | Guides, documentation, how-tos, best practices, Settings, configurations, gotchas |
 | `architecture` | Architecture decisions, system design patterns |
-| `ticket` | Tickets, tasks, action items, follow-ups |
-| `postmortem` | Post-incident analysis, root causes, remediation steps |
 
 **Adding or renaming types:**
 
@@ -226,8 +244,8 @@ types:
   - name: note
     description: "General observations, ideas, WIP thoughts"
     default: true
-  - name: bug
-    description: "Bug reports, error patterns, known issues"
+  - name: incident
+    description: "Production incidents, PagerDuty alerts, outages, escalations, bugs, issues"
   - name: my-custom-type
     description: "Whatever fits your workflow"
 ```
@@ -259,16 +277,14 @@ types:
   - name: note
     description: "General observations, ideas, WIP thoughts"
     default: true
-  - name: bug
-    description: "Bug reports, error patterns, known issues"
   - name: incident
-    description: "Production incidents, outages, escalations"
+    description: "Production incidents, PagerDuty alerts, outages, escalations, bugs, issues"
+  - name: ticket
+    description: "Jira tickets, DEVOPS-*, APP-*, OPS-*"
+  - name: guides
+    description: "Guides, documentation, how-tos, best practices, Settings, configurations, gotchas"
   - name: architecture
     description: "Architecture decisions, system design patterns"
-  - name: ticket
-    description: "Tickets, tasks, action items, follow-ups"
-  - name: postmortem
-    description: "Post-incident analysis, root causes, remediation steps"
 ```
 
 See the [LLM-polished vault](#llm-polished-vault-optional) section for what `llm_md_export` does.
@@ -315,6 +331,9 @@ memo reconcile
 
 # Apply them to the DB
 memo reconcile --apply
+
+# Snapshot of inventory, paths, vault drift, and the last async render error
+memo status
 ```
 
 Terminal output renders as colored cards with relative timestamps:
@@ -340,6 +359,7 @@ Terminal output renders as colored cards with relative timestamps:
 | `memo forget` | `--id` (required) | Permanent delete. `--id` accepts full UUID or 8-hex short-id prefix |
 | `memo export` | `--rename`, `--dry-run` | Full rebuild of the Obsidian vault from the DB; prunes orphans. Normal writes auto-sync without this command |
 | `memo reconcile` | `--apply` | Applies Obsidian-side deletes and type-folder moves to the DB. Dry-run by default |
+| `memo status` | | Snapshot of inventory (counts per type), paths, file sizes, vault drift, embedding + LLM render config, and the most recent async render error |
 | `memo serve` | | Starts MCP server over stdio |
 
 ## Obsidian Vault

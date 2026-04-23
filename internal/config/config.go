@@ -96,11 +96,10 @@ func DefaultConfig() *Config {
 		},
 		Types: []TypeDef{
 			{Name: "note", Description: "General observations, ideas, WIP thoughts", Default: true},
-			{Name: "bug", Description: "Bug reports, error patterns, known issues"},
-			{Name: "incident", Description: "Production incidents, outages, escalations"},
+			{Name: "incident", Description: "Production incidents, PagerDuty alerts, outages, escalations, bugs, issues"},
+			{Name: "ticket", Description: "Jira tickets, DEVOPS-*, APP-*, OPS-*"},
+			{Name: "guides", Description: "Guides, documentation, how-tos, best practices, settings, configurations, gotchas"},
 			{Name: "architecture", Description: "Architecture decisions, system design patterns"},
-			{Name: "ticket", Description: "Tickets, tasks, action items, follow-ups"},
-			{Name: "postmortem", Description: "Post-incident analysis, root causes, remediation steps"},
 		},
 	}
 }

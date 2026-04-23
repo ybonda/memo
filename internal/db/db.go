@@ -366,6 +366,49 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 	return results, rows.Err()
 }
 
+// CountAll returns the total number of rows in the memories table. Used by
+// the status command to report inventory size without loading every row.
+func (d *DB) CountAll() (int, error) {
+	var n int
+	err := d.conn.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&n)
+	return n, err
+}
+
+// CountByType returns a map of type name → row count. Types that appear in
+// config but have zero rows are NOT included; callers wanting a complete
+// histogram should union with cfg.Types.
+func (d *DB) CountByType() (map[string]int, error) {
+	rows, err := d.conn.Query(`SELECT type, COUNT(*) FROM memories GROUP BY type`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var t string
+		var n int
+		if err := rows.Scan(&t, &n); err != nil {
+			return nil, err
+		}
+		out[t] = n
+	}
+	return out, rows.Err()
+}
+
+// CreatedRange returns the earliest created_at and latest updated_at across
+// all memories, as their raw RFC3339 strings. Empty strings when the DB is
+// empty (sql.NullString handling). RFC3339 sorts lexicographically in the
+// same order as chronological time, so SQLite's MIN/MAX are correct without
+// needing to parse timestamps.
+func (d *DB) CreatedRange() (oldestCreated, newestUpdated string, err error) {
+	var oldest, newest sql.NullString
+	err = d.conn.QueryRow(`SELECT MIN(created_at), MAX(updated_at) FROM memories`).Scan(&oldest, &newest)
+	if err != nil {
+		return "", "", err
+	}
+	return oldest.String, newest.String, nil
+}
+
 func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 	var rows *sql.Rows
 	var err error
