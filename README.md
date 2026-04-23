@@ -1,8 +1,9 @@
 # memo
 
 [![Release](https://img.shields.io/github/v/release/ybonda/memo?sort=semver)](https://github.com/ybonda/memo/releases)
-
 [![License](https://img.shields.io/github/license/ybonda/memo)](./LICENSE)
+
+
 [![Memo - Featured on Aigregator](https://aigregator.com/badges/memo.svg)](https://aigregator.com/tools/memo?utm_source=badge&utm_medium=embed&utm_campaign=featured)
 
 Persistent memory for AI coding agents. Give Claude Code, Cursor, Codex, and other MCP-compatible tools a semantic memory that survives between sessions — all data stays on your machine.
