@@ -28,6 +28,12 @@ Formatting you SHOULD apply:
 - Keep inline code and code blocks intact.
 - Preserve all hyperlinks verbatim.
 
+Diagram transformation (the only exception to the preserve rules):
+- If you encounter a fenced code block whose body contains ASCII box-drawing characters (any of: ┌ ┐ └ ┘ │ ─ ├ ┤ ┬ ┴ ┼ ║ ═ ╔ ╗ ╚ ╝ ╠ ╣ ╦ ╩ ╬ ▲ ▼ ◄ ►), REPLACE the entire fenced block with a new fenced code block whose language tag is "mermaid" and whose body is a Mermaid flowchart. Use "flowchart LR" when the ASCII reads left-to-right, "flowchart TD" when it reads top-to-bottom.
+- Preserve every node label, every arrow direction, and every marker emoji (✅ 💥 ◄ ⚠️) inline in the Mermaid node text. Node labels with spaces or special characters go in double quotes: A["bundler2 ✅"].
+- If the ASCII structure is ambiguous, has tangled arrows, or you cannot faithfully preserve its meaning in Mermaid, leave the original ASCII block UNCHANGED.
+- This rule applies ONLY to diagrams. Log snippets, tree output (├─ └─), table borders, and other non-diagram ASCII art in code blocks stay exactly as-is.
+
 Output ONLY the reformatted markdown body.`
 
 // buildPrompt returns the full prompt to send to claude -p. We concatenate

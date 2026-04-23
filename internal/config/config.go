@@ -79,12 +79,20 @@ func DefaultConfig() *Config {
 		LLMExport: LLMExportConfig{
 			Enabled: false,
 			Command: "claude",
-			// Default to Sonnet: Opus is overkill for structural markdown
-			// rewriting, Haiku can miss section-header nuance. Sonnet is the
-			// sweet spot on quality vs. latency/subscription-quota. Override
-			// via config.yaml if you want to pin to a specific model ID.
-			Model:          "sonnet",
-			TimeoutSeconds: 60,
+			// Default to Haiku: the render runs async on every write, so
+			// latency matters more than the marginal quality edge Sonnet
+			// offers on a mechanical markdown-restructuring task. Haiku
+			// finishes typical memos (< 20 KB) well inside the 60s timeout;
+			// Sonnet routinely exceeds it on incident-sized inputs and the
+			// render gets discarded. Override via config.yaml if you want
+			// a specific model ID.
+			Model: "haiku",
+			// 180s gives ~3x headroom over typical Haiku render latency on
+			// medium memos (~10-15 KB). The fixed costs dominate: Claude Code
+			// CLI cold-start alone is 5-10s per invocation, plus token-by-token
+			// output on 3-4K tokens at Haiku's throughput lands around 40-50s.
+			// A 60s ceiling leaves essentially no margin and SIGKILLs on jitter.
+			TimeoutSeconds: 180,
 		},
 		Types: []TypeDef{
 			{Name: "note", Description: "General observations, ideas, WIP thoughts", Default: true},

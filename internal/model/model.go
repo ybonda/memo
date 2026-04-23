@@ -18,8 +18,13 @@ type Memory struct {
 	// successful claude-CLI render has run. Never fed into GenerateID or
 	// the embedding so dedup semantics stay content-only.
 	RenderedBody string `json:"rendered_body,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	// RenderedBy records which model produced RenderedBody (e.g. "haiku",
+	// "sonnet"). Empty string means no LLM render has run — the vault will
+	// display the deterministic formatter output. Cleared whenever content
+	// changes, bumped whenever the async render or `memo reformat` succeeds.
+	RenderedBy string `json:"rendered_by,omitempty"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 type MemoryWithScore struct {
@@ -35,7 +40,11 @@ type MemoryWithScore struct {
 
 type StoreResult struct {
 	ID            string  `json:"id"`
+	ShortID       string  `json:"short_id,omitempty"`
 	Status        string  `json:"status"`
+	Type          string  `json:"type,omitempty"`
+	SizeBytes     int     `json:"size_bytes,omitempty"`
+	TagCount      int     `json:"tag_count,omitempty"`
 	SimilarMemory *string `json:"similar_memory,omitempty"`
 }
 

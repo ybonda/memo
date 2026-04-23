@@ -249,6 +249,12 @@ embedding:
   cache_dir: ~/.memo/models
 duplicate_threshold: 0.90
 
+llm_md_export:
+  enabled: false         # opt-in; disabled by default
+  command: claude        # binary to invoke (must be on PATH)
+  model: haiku           # passed as --model to `claude -p` (haiku is default — fast enough to finish within timeout; sonnet often exceeds it on large memos)
+  timeout_seconds: 180   # per-render timeout (covers CLI cold start + generation on medium memos with diagram conversion)
+
 types:
   - name: note
     description: "General observations, ideas, WIP thoughts"
@@ -264,6 +270,8 @@ types:
   - name: postmortem
     description: "Post-incident analysis, root causes, remediation steps"
 ```
+
+See the [LLM-polished vault](#llm-polished-vault-optional) section for what `llm_md_export` does.
 
 ## CLI
 
@@ -378,6 +386,36 @@ Two structural changes you can make inside Obsidian are applied back to the DB w
 
 **Body formatting:** when `memo` writes a file, it runs the content through a small deterministic formatter that bolds ALL-CAPS lead-in labels (`KEY LESSON:`, `ROOT CAUSE:`), promotes inline `(1)(2)(3)` enumerations into real numbered lists, splits long paragraphs at sentence boundaries, and wraps hyphenated identifiers like `jobs-guideevents` in backticks. The raw content stored in the DB is untouched, so embeddings and IDs are unaffected. If you already write markdown (blank lines, lists, bold, or fenced code), the formatter leaves your text exactly as-is.
 
+### LLM-polished vault (optional)
+
+If you have the `claude` CLI installed and want richer Obsidian markdown (Obsidian `> [!info]` / `> [!warning]` callouts, wikilinked ticket IDs on first occurrence, promoted headings), enable the LLM polish in `~/.memo/config.yaml`:
+
+```yaml
+llm_md_export:
+  enabled: true
+  command: claude
+  model: haiku
+  timeout_seconds: 60
+```
+
+The feature uses your Claude Code subscription (no API key, no per-token billing — `claude -p` is invoked as a subprocess). A strict system prompt tells the model to restructure only, never paraphrase or drop content, so the polished body stays a faithful projection of what you stored.
+
+**Model choice:** Haiku is the default because the task is purely structural (restructure markdown, never add/paraphrase content) and the async flow rewards fast models. Haiku 4.5 finishes a ~16 KB memo in ~15-25s. Sonnet takes 60-120s for the same input and routinely exceeds the 60s timeout — the render gets discarded and the deterministic body stays in the vault. Switch to `sonnet` only if you find Haiku's callout/heading placement noticeably off.
+
+**How it runs:** the LLM pass is **asynchronous**. Every `memo_remember` / `memo_update` / `memo remember` / `memo update`:
+
+1. Writes the memory to the DB and syncs the `.md` file with the deterministic formatter — this completes in milliseconds and returns immediately.
+2. Schedules the LLM render in a background goroutine that overwrites the `.md` with the polished version when it finishes (~60-120s for a long memo).
+
+So the vault is always usable — Obsidian sees the deterministic version first, the polished version replaces it moments later. Claude Code (MCP) never waits on the render.
+
+**Trade-offs to know:**
+
+- Short-lived CLI processes (`memo remember "foo"`) wait for the render at `Close()` because the goroutine would otherwise be killed when the command exits. If you want fire-and-forget writes from the CLI, prefer the MCP server.
+- If you disable `llm_md_export` after using it, existing `.md` files keep their polished body until the next `memo update` or `memo export --rename`. The DB still stores the deterministic content as the source of truth.
+- `memo reformat <id>` (available when `llm_md_export.enabled: true`) re-runs the LLM render on a single memory synchronously. Useful when you want to re-polish one memory without waiting for the async path.
+- Render failures (timeout, claude CLI offline) are silent: the deterministic body stays in the vault, stderr logs `[memo] async llm render failed for <id>: ...`, and the DB is untouched.
+
 **When to run `memo export` manually:**
 
 - First-time setup, if `~/.memo/vault/` was deleted or moved
@@ -407,3 +445,4 @@ User-authored `.md` files in the vault (any filename that doesn't start with an 
 | Config-driven types | Extensible without recompilation, strict validation |
 | Dual output (TTY cards / JSON) | Human-friendly in terminal, machine-parseable when piped |
 | Vault is a one-way projection of the DB | Avoids conflict resolution; content-addressed IDs stay sound; users get Obsidian's UI without a two-sync-engine complexity |
+| LLM polish runs asynchronously | `memo_remember` / `memo_update` return in milliseconds; the optional `claude -p` pass runs in a background goroutine and upgrades the vault `.md` when ready — keeping Claude Code unblocked on long-form writes like incident memos |

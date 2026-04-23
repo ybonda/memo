@@ -89,6 +89,7 @@ func (d *DB) migrateMemoriesColumns() error {
 	for _, c := range []col{
 		{"context_json", `ALTER TABLE memories ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'`},
 		{"rendered_body", `ALTER TABLE memories ADD COLUMN rendered_body TEXT NOT NULL DEFAULT ''`},
+		{"rendered_by", `ALTER TABLE memories ADD COLUMN rendered_by TEXT NOT NULL DEFAULT ''`},
 	} {
 		if existing[c.name] {
 			continue
@@ -131,8 +132,8 @@ func (d *DB) Insert(mem *model.Memory, embedding []float32) error {
 	contextJSON := marshalContext(mem.Context)
 
 	_, err = tx.Exec(
-		`INSERT INTO memories (id, content, type, tags, context_json, rendered_body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		mem.ID, mem.Content, mem.Type, string(tagsJSON), contextJSON, mem.RenderedBody, mem.CreatedAt, mem.UpdatedAt,
+		`INSERT INTO memories (id, content, type, tags, context_json, rendered_body, rendered_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		mem.ID, mem.Content, mem.Type, string(tagsJSON), contextJSON, mem.RenderedBody, mem.RenderedBy, mem.CreatedAt, mem.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
@@ -172,8 +173,8 @@ func (d *DB) Update(mem *model.Memory, embedding []float32) error {
 	contextJSON := marshalContext(mem.Context)
 
 	_, err = tx.Exec(
-		`UPDATE memories SET content = ?, type = ?, tags = ?, context_json = ?, rendered_body = ?, updated_at = ? WHERE id = ?`,
-		mem.Content, mem.Type, string(tagsJSON), contextJSON, mem.RenderedBody, mem.UpdatedAt, mem.ID,
+		`UPDATE memories SET content = ?, type = ?, tags = ?, context_json = ?, rendered_body = ?, rendered_by = ?, updated_at = ? WHERE id = ?`,
+		mem.Content, mem.Type, string(tagsJSON), contextJSON, mem.RenderedBody, mem.RenderedBy, mem.UpdatedAt, mem.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update memory: %w", err)
@@ -238,7 +239,7 @@ func (d *DB) Exists(id string) (bool, error) {
 
 func (d *DB) Get(id string) (*model.Memory, error) {
 	row := d.conn.QueryRow(
-		`SELECT id, content, type, tags, context_json, rendered_body, created_at, updated_at FROM memories WHERE id = ?`, id,
+		`SELECT id, content, type, tags, context_json, rendered_body, rendered_by, created_at, updated_at FROM memories WHERE id = ?`, id,
 	)
 	return scanMemory(row)
 }
@@ -249,20 +250,22 @@ func (d *DB) Get(id string) (*model.Memory, error) {
 // first match is returned.
 func (d *DB) FindByShortID(short string) (*model.Memory, error) {
 	row := d.conn.QueryRow(
-		`SELECT id, content, type, tags, context_json, rendered_body, created_at, updated_at FROM memories WHERE id LIKE ? LIMIT 1`,
+		`SELECT id, content, type, tags, context_json, rendered_body, rendered_by, created_at, updated_at FROM memories WHERE id LIKE ? LIMIT 1`,
 		short+"%",
 	)
 	return scanMemory(row)
 }
 
-// UpdateRenderedBody replaces just the cached LLM-rendered markdown for a
-// memory. Content, type, tags, embedding, and timestamps are untouched, so
-// this is safe to call from `memo reformat` without bumping updated_at or
-// forcing a re-sync of downstream consumers that key off content edits.
-func (d *DB) UpdateRenderedBody(id, rendered string) error {
+// UpdateRenderedBody replaces just the cached LLM-rendered markdown and the
+// model identifier that produced it. Content, type, tags, embedding, and
+// timestamps are untouched, so this is safe to call from `memo reformat` or
+// the async render hook without bumping updated_at or forcing a re-sync of
+// downstream consumers that key off content edits. Pass an empty `by` to
+// clear the LLM attribution (e.g. when forcing a fallback to deterministic).
+func (d *DB) UpdateRenderedBody(id, rendered, by string) error {
 	res, err := d.conn.Exec(
-		`UPDATE memories SET rendered_body = ? WHERE id = ?`,
-		rendered, id,
+		`UPDATE memories SET rendered_body = ?, rendered_by = ? WHERE id = ?`,
+		rendered, by, id,
 	)
 	if err != nil {
 		return err
@@ -308,7 +311,7 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 	var rows *sql.Rows
 	if memType != nil {
 		rows, err = d.conn.Query(
-			`SELECT m.id, m.content, m.type, m.tags, m.context_json, m.rendered_body, m.created_at, m.updated_at, v.distance
+			`SELECT m.id, m.content, m.type, m.tags, m.context_json, m.rendered_body, m.rendered_by, m.created_at, m.updated_at, v.distance
 			FROM memories_vec v
 			JOIN memory_vectors mv ON mv.vec_rowid = v.rowid
 			JOIN memories m ON m.id = mv.memory_id
@@ -318,7 +321,7 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 		)
 	} else {
 		rows, err = d.conn.Query(
-			`SELECT m.id, m.content, m.type, m.tags, m.context_json, m.rendered_body, m.created_at, m.updated_at, v.distance
+			`SELECT m.id, m.content, m.type, m.tags, m.context_json, m.rendered_body, m.rendered_by, m.created_at, m.updated_at, v.distance
 			FROM memories_vec v
 			JOIN memory_vectors mv ON mv.vec_rowid = v.rowid
 			JOIN memories m ON m.id = mv.memory_id
@@ -335,10 +338,10 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 	var results []model.MemoryWithScore
 	for rows.Next() {
 		var (
-			id, content, typ, tagsJSON, contextJSON, renderedBody, createdAt, updatedAt string
-			distance                                                                    float64
+			id, content, typ, tagsJSON, contextJSON, renderedBody, renderedBy, createdAt, updatedAt string
+			distance                                                                                float64
 		)
-		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &renderedBody, &createdAt, &updatedAt, &distance); err != nil {
+		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &renderedBody, &renderedBy, &createdAt, &updatedAt, &distance); err != nil {
 			return nil, err
 		}
 		var tags []string
@@ -358,6 +361,7 @@ func (d *DB) KNNSearch(embedding []float32, limit int, memType *string) ([]model
 			Score:     float32(1.0 - distance),
 		})
 		_ = renderedBody // search results never render a cached body
+		_ = renderedBy
 	}
 	return results, rows.Err()
 }
@@ -368,12 +372,12 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 
 	if memType != nil {
 		rows, err = d.conn.Query(
-			`SELECT id, content, type, tags, context_json, rendered_body, created_at, updated_at FROM memories WHERE type = ? ORDER BY updated_at DESC LIMIT ?`,
+			`SELECT id, content, type, tags, context_json, rendered_body, rendered_by, created_at, updated_at FROM memories WHERE type = ? ORDER BY updated_at DESC LIMIT ?`,
 			*memType, limit,
 		)
 	} else {
 		rows, err = d.conn.Query(
-			`SELECT id, content, type, tags, context_json, rendered_body, created_at, updated_at FROM memories ORDER BY updated_at DESC LIMIT ?`,
+			`SELECT id, content, type, tags, context_json, rendered_body, rendered_by, created_at, updated_at FROM memories ORDER BY updated_at DESC LIMIT ?`,
 			limit,
 		)
 	}
@@ -384,8 +388,8 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 
 	var results []model.Memory
 	for rows.Next() {
-		var id, content, typ, tagsJSON, contextJSON, renderedBody, createdAt, updatedAt string
-		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &renderedBody, &createdAt, &updatedAt); err != nil {
+		var id, content, typ, tagsJSON, contextJSON, renderedBody, renderedBy, createdAt, updatedAt string
+		if err := rows.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &renderedBody, &renderedBy, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		var tags []string
@@ -401,6 +405,7 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 			Tags:         tags,
 			Context:      unmarshalContext(contextJSON),
 			RenderedBody: renderedBody,
+			RenderedBy:   renderedBy,
 			CreatedAt:    createdAt,
 			UpdatedAt:    updatedAt,
 		})
@@ -409,8 +414,8 @@ func (d *DB) ListAll(limit int, memType *string) ([]model.Memory, error) {
 }
 
 func scanMemory(row *sql.Row) (*model.Memory, error) {
-	var id, content, typ, tagsJSON, contextJSON, renderedBody, createdAt, updatedAt string
-	err := row.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &renderedBody, &createdAt, &updatedAt)
+	var id, content, typ, tagsJSON, contextJSON, renderedBody, renderedBy, createdAt, updatedAt string
+	err := row.Scan(&id, &content, &typ, &tagsJSON, &contextJSON, &renderedBody, &renderedBy, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -429,6 +434,7 @@ func scanMemory(row *sql.Row) (*model.Memory, error) {
 		Tags:         tags,
 		Context:      unmarshalContext(contextJSON),
 		RenderedBody: renderedBody,
+		RenderedBy:   renderedBy,
 		CreatedAt:    createdAt,
 		UpdatedAt:    updatedAt,
 	}, nil

@@ -105,6 +105,22 @@ func TestRenderEmptyInput(t *testing.T) {
 	}
 }
 
+func TestRenderRejectsOversizedInput(t *testing.T) {
+	r := NewFromConfig(config.LLMExportConfig{
+		Enabled:        true,
+		Command:        "claude",
+		TimeoutSeconds: 2,
+	})
+	oversize := strings.Repeat("a", MaxRenderBytes+1)
+	_, err := r.Render(context.Background(), oversize)
+	if err == nil {
+		t.Fatal("expected error for oversized input")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("error should mention size; got: %v", err)
+	}
+}
+
 func TestRenderTimeoutHonored(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("sh not available")

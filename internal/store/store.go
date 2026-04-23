@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ybonda/memo/internal/config"
 	"github.com/ybonda/memo/internal/db"
@@ -56,6 +57,10 @@ type MemoryStore struct {
 	config   *config.Config
 	vault    *vault.Vault // optional; nil disables vault export
 	renderer llm.Renderer // optional; nil when LLMExport.Enabled is false
+
+	// renderWG tracks in-flight async LLM renders. Close() drains it so
+	// pending work gets a chance to persist before shutdown.
+	renderWG sync.WaitGroup
 }
 
 // New constructs a MemoryStore. The vault is optional — pass nil to disable
@@ -96,21 +101,49 @@ func New(cfg *config.Config, v *vault.Vault) (*MemoryStore, error) {
 	}, nil
 }
 
-// renderedBodyOrEmpty invokes the LLM renderer if one is configured and
-// returns its output, or "" on any failure (logged to stderr). Errors never
-// propagate: the store's contract is that a vault-side renderer outage must
-// not fail the DB write. Callers should fall through to Format() downstream
-// when the return is empty.
-func (s *MemoryStore) renderedBodyOrEmpty(content string) string {
+// scheduleRender fires the LLM render in a background goroutine after the DB
+// row is already persisted. The goroutine re-fetches the memory before writing
+// RenderedBody so a subsequent Update that advances UpdatedAt invalidates
+// stale renders rather than letting them overwrite fresher content. Errors
+// are logged but never propagate: the caller has already returned success.
+//
+// No-op when no renderer is configured. Callers must invoke this AFTER the
+// initial db.Insert/db.Update + syncVault so the vault always has a valid
+// deterministic body even if the LLM pass never completes (short-lived CLI
+// processes, timeouts, etc).
+func (s *MemoryStore) scheduleRender(id, content, updatedAt string) {
 	if s.renderer == nil {
-		return ""
+		return
 	}
-	rendered, err := s.renderer.Render(context.Background(), content)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[memo] llm render failed, falling back to deterministic: %v\n", err)
-		return ""
-	}
-	return rendered
+	s.renderWG.Go(func() {
+		rendered, err := s.renderer.Render(context.Background(), content)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[memo] async llm render failed for %s: %v\n", id, err)
+			return
+		}
+		cur, err := s.db.Get(id)
+		if err != nil || cur == nil {
+			return
+		}
+		if cur.UpdatedAt != updatedAt {
+			return // memory mutated mid-render; drop stale output
+		}
+		by := s.renderer.Model()
+		if err := s.db.UpdateRenderedBody(id, rendered, by); err != nil {
+			fmt.Fprintf(os.Stderr, "[memo] async llm db update failed for %s: %v\n", id, err)
+			return
+		}
+		cur.RenderedBody = rendered
+		cur.RenderedBy = by
+		s.syncVault(cur)
+	})
+}
+
+// FlushRenders blocks until all in-flight async renders complete. Close()
+// calls it automatically; exposed for tests or callers (e.g. CLI paths) that
+// need the vault to be LLM-finalized before proceeding.
+func (s *MemoryStore) FlushRenders() {
+	s.renderWG.Wait()
 }
 
 // Vault returns the underlying vault handle, or nil if none is attached.
@@ -149,7 +182,14 @@ func (s *MemoryStore) deleteVault(id string) {
 	}
 }
 
+// Close drains any in-flight async LLM renders, then tears down the DB and
+// embedder. Drain guarantees that renders scheduled during normal operation
+// (MCP server lifetime, CLI command execution) have a chance to land in the
+// DB and vault before the process exits. Goroutines are cheap; this is a
+// simple wait rather than a timeout because the renderer already enforces its
+// own per-call timeout (llm_md_export.timeout_seconds in config.yaml).
 func (s *MemoryStore) Close() {
+	s.renderWG.Wait()
 	if s.db != nil {
 		s.db.Close()
 	}
@@ -203,14 +243,13 @@ func (s *MemoryStore) Store(content string, tags []string, memType string, ctx m
 
 	now := model.NowRFC3339()
 	mem := &model.Memory{
-		ID:           id,
-		Content:      content,
-		Type:         memType,
-		Tags:         tags,
-		Context:      ctx,
-		RenderedBody: s.renderedBodyOrEmpty(content),
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:        id,
+		Content:   content,
+		Type:      memType,
+		Tags:      tags,
+		Context:   ctx,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	if err := s.db.Insert(mem, emb); err != nil {
@@ -218,7 +257,15 @@ func (s *MemoryStore) Store(content string, tags []string, memType string, ctx m
 	}
 
 	s.syncVault(mem)
-	return &model.StoreResult{ID: id, Status: "created"}, nil
+	s.scheduleRender(mem.ID, mem.Content, mem.UpdatedAt)
+	return &model.StoreResult{
+		ID:        id,
+		ShortID:   vault.ShortID(id),
+		Status:    "created",
+		Type:      memType,
+		SizeBytes: len(content),
+		TagCount:  len(tags),
+	}, nil
 }
 
 func (s *MemoryStore) Search(query string, limit int, memType *string) ([]model.MemoryWithScore, error) {
@@ -274,11 +321,13 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 	}
 	mem.UpdatedAt = model.NowRFC3339()
 
-	// Re-render only when content actually changed; otherwise the cached
-	// rendered body is still accurate and re-invoking the LLM just burns
-	// subscription quota without user-visible benefit.
+	// Clear cached rendered body and model attribution when content changed
+	// so the vault falls back to the deterministic Format() until the async
+	// render finishes. Without this, syncVault below would emit stale LLM
+	// output tagged with a stale model for the new content.
 	if contentChanged {
-		mem.RenderedBody = s.renderedBodyOrEmpty(mem.Content)
+		mem.RenderedBody = ""
+		mem.RenderedBy = ""
 	}
 
 	emb, err := s.embedder.Embed(mem.Content)
@@ -291,6 +340,9 @@ func (s *MemoryStore) Update(id string, content *string, tags *[]string, memType
 	}
 
 	s.syncVault(mem)
+	if contentChanged {
+		s.scheduleRender(mem.ID, mem.Content, mem.UpdatedAt)
+	}
 	return &model.UpdateResult{Updated: true, Memory: mem}, nil
 }
 
@@ -463,10 +515,12 @@ func (s *MemoryStore) ReformatOne(id string) (*ReformatOneResult, error) {
 	if rendered == m.RenderedBody {
 		return &ReformatOneResult{ID: m.ID, Title: title, Skipped: true}, nil
 	}
-	if err := s.db.UpdateRenderedBody(m.ID, rendered); err != nil {
+	by := s.renderer.Model()
+	if err := s.db.UpdateRenderedBody(m.ID, rendered, by); err != nil {
 		return nil, fmt.Errorf("db update: %w", err)
 	}
 	m.RenderedBody = rendered
+	m.RenderedBy = by
 	s.syncVault(m)
 	return &ReformatOneResult{ID: m.ID, Title: title, Rendered: true}, nil
 }
